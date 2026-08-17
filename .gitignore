@@ -1,0 +1,29 @@
+# Lean builds
+*.olean
+.lake/
+
+# compile-env runtime artifacts
+compile-env/*/Upload.lean
+compile-env/*/.upload.json
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# node
+node_modules/
+dist/
+build/
+
+# terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+
+# env / secrets
+.env
+.env.*
+*.pem

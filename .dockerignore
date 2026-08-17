@@ -1,0 +1,11 @@
+.venv
+.git
+__pycache__
+*.pyc
+docs
+*.md
+node_modules
+web/dist
+**/.lake
+compile-env/*/Upload.lean
+compile-env/*/.upload.json

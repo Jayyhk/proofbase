@@ -1,0 +1,623 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color: #1a1a1a;
+  background: #ffffff;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 40px 24px;
+}
+
+h1 {
+  font-weight: 600;
+}
+
+table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.name-col {
+  width: 150px;
+}
+
+.name-cell {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.data-col {
+  width: 104px;
+}
+
+.check-col {
+  width: 36px;
+}
+
+.check-cell {
+  text-align: center;
+  cursor: default;
+}
+
+.check-th {
+  text-align: center;
+  vertical-align: middle;
+  border-bottom: 2px solid #ddd;
+}
+
+.check-cell input,
+.check-th input {
+  cursor: pointer;
+}
+
+.gear-col {
+  width: 46px;
+}
+
+.gear-cell {
+  text-align: center;
+  border-bottom: none;
+}
+
+.gear-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #bbb;
+  padding: 4px;
+}
+
+.gear-btn:hover {
+  color: #1a1a1a;
+}
+
+th,
+td {
+  padding: 8px 10px;
+  text-align: center;
+  border-bottom: 1px solid #eee;
+}
+
+thead th {
+  font-weight: 600;
+  color: #777;
+  border-bottom: none;
+  vertical-align: bottom;
+  line-height: 1.2;
+}
+
+thead tr:first-child th:not(.band) {
+  padding-bottom: 0;
+}
+
+thead tr:last-child th {
+  border-bottom: 2px solid #ddd;
+  padding-top: 4px;
+}
+
+.band {
+  text-align: center;
+  border-bottom: 1px solid #ccc;
+  padding-bottom: 4px;
+}
+
+.divider {
+  border-left: 1px dashed #ccc;
+}
+
+.axiom-col {
+  width: 90px;
+}
+
+.sortable {
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.sortable.on {
+  color: #1a1a1a;
+}
+
+tbody tr {
+  cursor: pointer;
+}
+
+tbody tr:hover {
+  background: #fafafa;
+}
+
+.graph-full {
+  position: fixed;
+  inset: 0;
+  background: #fff;
+}
+
+.graph-viewport {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+}
+
+.graph-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+
+.graph-canvas svg {
+  display: block;
+}
+
+.graph-canvas .node {
+  cursor: pointer;
+}
+
+.graph-canvas .node,
+.graph-canvas .edge {
+  transition: opacity 0.15s;
+}
+
+.graph-canvas svg.has-selection .node,
+.graph-canvas svg.has-selection .edge {
+  opacity: 0.18;
+}
+
+.graph-canvas svg.has-selection .node.hl,
+.graph-canvas svg.has-selection .edge.hl {
+  opacity: 1;
+}
+
+.graph-canvas .node.selected path,
+.graph-canvas .node.selected polygon {
+  stroke: #60a5fa;
+  stroke-width: 2.5;
+}
+
+.graph-back {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 5;
+}
+
+.graph-title {
+  position: absolute;
+  top: 16px;
+  right: 20px;
+  z-index: 5;
+  margin: 0;
+  text-align: right;
+  font-size: 18px;
+  font-weight: 600;
+  color: #1a1a1a;
+  line-height: 1.2;
+}
+
+.graph-title::before {
+  content: 'proof';
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #aaa;
+}
+
+.graph-error {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+}
+
+.graph-notfound {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  text-align: center;
+  padding: 24px;
+}
+
+.graph-notfound h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+.graph-notfound p {
+  margin: 0;
+  color: #666;
+}
+
+.graph-notfound code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #f4f4f5;
+  border-radius: 4px;
+  padding: 1px 6px;
+  color: #1a1a1a;
+}
+
+.graph-notfound .add {
+  margin-top: 4px;
+}
+
+.graph-zoom {
+  position: absolute;
+  bottom: 20px;
+  left: 20px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+}
+
+.graph-zoom button {
+  width: 32px;
+  height: 32px;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  border: 1px solid #ddd;
+  background: #fff;
+  color: #1a1a1a;
+}
+
+.graph-zoom button:first-child {
+  border-radius: 6px 6px 0 0;
+  border-bottom: none;
+}
+
+.graph-zoom button:last-child {
+  border-radius: 0 0 6px 6px;
+}
+
+.graph-zoom button:hover {
+  background: #f4f4f4;
+}
+
+.graph-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 320px;
+  z-index: 6;
+  overflow-y: auto;
+  padding: 24px;
+  background: #fff;
+  border-left: 1px solid #eee;
+  box-shadow: -4px 0 16px rgba(0, 0, 0, 0.04);
+  font-size: 14px;
+}
+
+.graph-panel h2 {
+  margin: 0 32px 4px 0;
+  font-size: 18px;
+  word-break: break-word;
+}
+
+.panel-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  border: none;
+  background: none;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  color: #999;
+}
+
+.panel-full {
+  margin: 0 0 16px;
+  color: #999;
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.graph-panel dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0 0 20px;
+}
+
+.graph-panel dt {
+  color: #999;
+}
+
+.graph-panel dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.graph-panel h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #777;
+}
+
+/* opens the declaration's source in a modal. styled to match the panel's h3 headings */
+.source-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 20px;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  color: #777;
+  cursor: pointer;
+}
+
+.source-btn:hover {
+  color: #1a1a1a;
+}
+
+/* the .lean snippet inside the modal, where there is room to read it */
+.source-full {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre;
+  overflow: auto;
+  color: #333;
+  background: #f7f7f7;
+  border-radius: 6px;
+  padding: 16px;
+}
+
+.panel-axioms {
+  list-style: none;
+  margin: 0 0 24px;
+  padding: 0;
+}
+
+.panel-axioms li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid #f2f2f2;
+  word-break: break-all;
+}
+
+.axiom-kind {
+  color: #999;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.panel-neighbors {
+  list-style: none;
+  margin: 0 0 20px;
+  padding: 0;
+}
+
+.panel-neighbors button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 4px 0;
+  font-size: 14px;
+  color: #1e7a46;
+  cursor: pointer;
+  word-break: break-all;
+}
+
+.panel-neighbors button:hover {
+  text-decoration: underline;
+}
+
+.panel-neighbors button.flag {
+  color: #c0392b;
+}
+
+.panel-neighbors button.flag-trust {
+  color: #ca8a04;
+}
+
+.flag {
+  color: #c0392b;
+}
+
+.flag-trust {
+  color: #ca8a04;
+}
+
+td.flag,
+td.flag-trust {
+  font-weight: 600;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.trash-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #c0392b;
+  border-color: #f0b6b0;
+}
+
+.trash-btn:hover {
+  background: #fdecea;
+}
+
+.add {
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  padding: 6px 12px;
+}
+
+.add:hover {
+  background: #f4f4f4;
+}
+
+.error {
+  color: #c0392b;
+  background: #fdecea;
+  border: 1px solid #f5c6c2;
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+.status-row td {
+  color: #888;
+  font-style: italic;
+}
+
+.status-row {
+  cursor: default;
+}
+
+.status-row.failed td {
+  color: #c0392b;
+  font-style: normal;
+}
+
+.status-row.failed {
+  cursor: pointer;
+}
+
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  border: 2px solid #ccc;
+  border-top-color: #666;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 20;
+}
+
+.modal {
+  position: relative;
+  background: #fff;
+  border-radius: 8px;
+  padding: 20px 24px;
+  max-width: 80vw;
+  max-height: 80vh;
+  overflow: auto;
+}
+
+.modal h2 {
+  margin: 0 0 16px;
+  font-size: 16px;
+  color: #1a1a1a;
+}
+
+.modal h2.fail-title {
+  color: #c0392b;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+  font-size: 14px;
+  color: #555;
+}
+
+.field select,
+.field input {
+  font-size: 14px;
+}
+
+.field select,
+.field input[type='text'] {
+  padding: 6px 8px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.compile-btn {
+  margin-top: 4px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.add:disabled {
+  color: #aaa;
+  border-color: #e2e2e2;
+  cursor: not-allowed;
+  background: #fafafa;
+}
+
+.compile-log {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  color: #333;
+  background: #f7f7f7;
+  border-radius: 6px;
+  padding: 12px;
+}
