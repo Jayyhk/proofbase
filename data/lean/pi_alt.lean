@@ -141,8 +141,6 @@ noncomputable def deriv (f : CS (n + 1) E) : CS n E where
 lemma hasDerivAt (f : CS (n + 1) E) (x : ℝ) : HasDerivAt f (f.deriv x) x :=
   (f.h1.differentiable (by simp)).differentiableAt.hasDerivAt
 
-lemma deriv_apply {f : CS (n + 1) E} {x : ℝ} : f.deriv x = _root_.deriv f x := rfl
-
 lemma deriv_smul {f : CS (n + 1) E} : (R • f).deriv = R • f.deriv := by
   ext x ; exact (f.hasDerivAt x |>.const_smul R).deriv
 
@@ -2199,10 +2197,6 @@ lemma wiener_ikehara_smooth' (hf : ∀ (σ' : ℝ), 1 < σ' → Summable (nterm 
 
 local instance {E : Type*} : Coe (E → ℝ) (E → ℂ) := ⟨fun f n => f n⟩
 
-@[norm_cast]
-theorem set_integral_ofReal {f : ℝ → ℝ} {s : Set ℝ} : ∫ x in s, (f x : ℂ) = ∫ x in s, f x :=
-  integral_ofReal
-
 lemma wiener_ikehara_smooth_real {f : ℕ → ℝ} {Ψ : ℝ → ℝ}
     (hf : ∀ (σ' : ℝ), 1 < σ' → Summable (nterm f σ'))
     (hcheby : cheby f) (hG : ContinuousOn G {s | 1 ≤ s.re})
@@ -2612,36 +2606,12 @@ open Finset
 open BigOperators Filter Real Classical Asymptotics MeasureTheory intervalIntegral
 open scoped ArithmeticFunction.Moebius ArithmeticFunction.Omega Chebyshev
 
-lemma Set.Ico_subset_Ico_of_Icc_subset_Icc {a b c d : ℝ} (h : Set.Icc a b ⊆ Set.Icc c d) :
-    Set.Ico a b ⊆ Set.Ico c d := by
-  intro z hz
-  have hz' := Set.Ico_subset_Icc_self.trans h hz
-  have hcd : c ≤ d := by
-    contrapose! hz'
-    rw [Icc_eq_empty_of_lt hz']
-    exact notMem_empty _
-  simp only [mem_Ico, mem_Icc] at *
-  refine ⟨hz'.1, hz'.2.eq_or_lt.resolve_left ?_⟩
-  rintro rfl
-  apply hz.2.not_ge
-  have := h <| right_mem_Icc.mpr (hz.1.trans hz.2.le)
-  simp only [mem_Icc] at this
-  exact this.2
-
 lemma th43_b (x : ℝ) (hx : 2 ≤ x) :
     Nat.primeCounting ⌊x⌋₊ =
       θ x / log x + ∫ t in Set.Icc 2 x, θ t / (t * (Real.log t) ^ 2) := by
   rw [integral_Icc_eq_integral_Ioc, ← intervalIntegral.integral_of_le hx]
   exact Chebyshev.primeCounting_eq_theta_div_log_add_integral hx
 
-
-/-- If u ~ v and w-u = o(v) then w ~ v. -/
-theorem Asymptotics.IsEquivalent.add_isLittleO' {α : Type*} {β : Type*} [NormedAddCommGroup β]
-    {u : α → β} {v : α → β} {w : α → β} {l : Filter α}
-    (huv : Asymptotics.IsEquivalent l u v) (hwu : (w - u) =o[l] v) :
-    Asymptotics.IsEquivalent l w v := by
-  rw [← add_sub_cancel u w]
-  exact add_isLittleO huv hwu
 
 /-- If u ~ v and u-w = o(v) then w ~ v. -/
 theorem Asymptotics.IsEquivalent.add_isLittleO'' {α : Type*} {β : Type*} [NormedAddCommGroup β]
