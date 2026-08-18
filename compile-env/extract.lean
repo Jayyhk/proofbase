@@ -75,7 +75,14 @@ def rangeOf (env : Environment) (n : Name) : Option DeclarationRange :=
 
 -- Lean generates these from something the user wrote. only the user's own go in the graph
 def isDerived (env : Environment) (n : Name) : Bool := Id.run do
+  -- a structure's constructor and its field projections
   if env.isConstructor n || env.isProjectionFn n then
+    return true
+  -- recursors, injEq, noConfusion and the like have no source line of their own
+  if (rangeOf env n).isNone then
+    return true
+  -- internal Lean «...» names
+  if n.toString.any (· == '«') then
     return true
   -- an anonymous instance is named inst<TypeName>, the user would have named it themselves
   if let .str _ s := n then

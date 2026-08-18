@@ -98,9 +98,7 @@ LEFT JOIN axiom_policy pol ON pol.name = ax.name;
 -- declarations to include in the graph view
 CREATE VIEW graph_declaration AS
 SELECT * FROM declaration d
-WHERE d.line_start IS NOT NULL -- has a real source line
-  AND NOT d.is_generated -- skip compiler generated declarations
-  AND d.name NOT LIKE '%«%' -- skip more internal Lean «...» names
+WHERE NOT d.is_generated -- extract.lean decides this
   AND d.name NOT IN (SELECT name FROM axiom_policy); -- skip known axioms
 
 -- edges to draw. a dependency can pass through a declaration that graph_declaration hides, so step over those to the next visible one
