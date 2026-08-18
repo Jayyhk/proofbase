@@ -73,6 +73,22 @@ def rangeOf (env : Environment) (n : Name) : Option DeclarationRange :=
   (declRangeExt.find? (level := .exported) env n
     <|> declRangeExt.find? (level := .server) env n).map (·.range)
 
+-- Lean generates these from something the user wrote. only the user's own go in the graph
+def isDerived (env : Environment) (n : Name) : Bool := Id.run do
+  if env.isConstructor n || env.isProjectionFn n then
+    return true
+  -- an anonymous instance is named inst<TypeName>, the user would have named it themselves
+  if let .str _ s := n then
+    if s.startsWith "inst" then
+      match s.toList.drop 4 with
+      | c :: _ => if c.isUpper then return true
+      | [] => pure ()
+  -- an attribute's lemma sits at the same source range as the declaration it came from
+  let .str parent _ := n | return false
+  let some pr := rangeOf env parent | return false
+  let some r := rangeOf env n | return false
+  return pr.pos.line <= r.pos.line && r.endPos.line <= pr.endPos.line
+
 -- converts an optional string into json (null if absent)
 def optStr : Option String -> Json
   | some s => toJson s
@@ -86,7 +102,7 @@ def nodeJson (env : Environment) (ax : AxCache)
   return Json.mkObj [
     ("name", toJson name.toString),
     ("kind", toJson (kindOf info)),
-    ("generated", toJson name.isInternalDetail),
+    ("generated", toJson (name.isInternalDetail || isDerived env name)),
     ("lineStart", match r with | some r => toJson r.pos.line | none => Json.null),
     ("lineEnd", match r with | some r => toJson r.endPos.line | none => Json.null),
     ("axioms", toJson ((axs.toList.filter (· != name)).map Name.toString).toArray)
