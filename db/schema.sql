@@ -102,3 +102,22 @@ WHERE d.line_start IS NOT NULL -- has a real source line
   AND NOT d.is_generated -- skip compiler generated declarations
   AND d.name NOT LIKE '%«%' -- skip more internal Lean «...» names
   AND d.name NOT IN (SELECT name FROM axiom_policy); -- skip known axioms
+
+-- edges to draw. a dependency can pass through a declaration that graph_declaration hides, so step over those to the next visible one
+-- ex: A -> foo._proof_6 -> B becomes A -> B
+CREATE VIEW graph_edge AS
+WITH RECURSIVE step (proof_id, from_id, to_id) AS (
+        SELECT e.proof_id, e.from_id, e.to_id
+        FROM edge e
+        JOIN graph_declaration f ON f.id = e.from_id
+        WHERE f.kind <> 'axiom' -- axioms depend on nothing
+    UNION -- not UNION ALL, so a cycle can't loop forever
+        SELECT s.proof_id, s.from_id, e.to_id
+        FROM step s
+        JOIN edge e ON e.from_id = s.to_id
+        WHERE NOT EXISTS (SELECT 1 FROM graph_declaration g WHERE g.id = s.to_id) -- only step over hidden ones
+)
+SELECT DISTINCT proof_id, from_id, to_id
+FROM step
+WHERE EXISTS (SELECT 1 FROM graph_declaration g WHERE g.id = to_id) -- has to land on a visible one
+  AND from_id <> to_id; -- stepping over can lead back to the source

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import signal
 import subprocess
 from pathlib import Path
@@ -50,19 +51,72 @@ def clean_output(result):
     return "\n".join(lines).strip()
 
 
+# lean --json prints one message per line
+def parse_messages(result):
+    messages = []
+    for line in result.stdout.splitlines():
+        try:
+            messages.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass # lake prints plain lines too
+    return messages
+
+
+# just the errors, in the "file:line:col: message" form the failure log shows
+def error_text(messages):
+    return "\n".join(
+        f"Upload.lean:{m['pos']['line']}:{m['pos']['column']}: {m['data']}"
+        for m in messages if m.get("severity") == "error"
+    ).strip()
+
+
+# a simp lemma proved by rfl leaves no trace in the proof term, so the extractor misses it
+SIMP_TRACE = re.compile(r"\[Meta\.Tactic\.simp\.rewrite\]\s+([A-Za-z_][\w.'\u2019]*)")
+
+
+# the lemmas simp used, paired with the declaration that used them.
+# the trace names the lemma, the position tells us who it was for
+def simp_edges(messages, nodes):
+    owned = {n["name"] for n in nodes}
+    # smallest range first, so the innermost declaration wins
+    ranges = sorted(
+        ((n["lineStart"], n["lineEnd"] or n["lineStart"], n["name"]) for n in nodes if n["lineStart"]),
+        key=lambda r: r[1] - r[0]
+    )
+
+    edges = set()
+    for message in messages:
+        lemma = SIMP_TRACE.search(message.get("data", ""))
+        if lemma is None or lemma.group(1) not in owned:
+            continue # a mathlib lemma, we only graph the proof's own
+        at = message.get("pos", {}).get("line")
+        user = next((name for lo, hi, name in ranges if lo <= at <= hi), None)
+        if user is not None and user != lemma.group(1): # no self loops
+            edges.add((user, lemma.group(1)))
+    return edges
+
+
 # write the proof, compile it, run the extractor, return graph json
 def compile_and_extract(file, version):
     env_dir = COMPILE_ENV / version # lean version dir
     upload = env_dir / "Upload.lean"
     out = env_dir / ".upload.json"
+    olean = env_dir / ".lake" / "build" / "lib" / "lean" / "Upload.olean"
     upload.write_text(file) # write the uploaded proof into Upload.lean
+    olean.parent.mkdir(parents=True, exist_ok=True) # lake makes this, but not on a fresh box
 
-    build = run(["lake", "build", "Upload"], env_dir) # compile the proof
+    build = run(["lake", "env", "lean", "--json", "-D", "trace.Meta.Tactic.simp.rewrite=true", "-o", str(olean), "Upload.lean"], env_dir) # compile the proof
+    messages = parse_messages(build)
     if build.returncode != 0:
-        raise CompileError(clean_output(build))
+        raise CompileError(error_text(messages) or clean_output(build))
 
     extract = run(["lake", "env", "lean", "--run", str(EXTRACTOR), "-o", str(out), "Upload"], env_dir) # extract info from .olean files
     if extract.returncode != 0:
         raise CompileError(clean_output(extract))
 
-    return json.loads(out.read_text()) # parse json the extractor wrote
+    graph = json.loads(out.read_text()) # parse json the extractor wrote
+
+    known = {(e["from"], e["to"]) for e in graph["edges"]}
+    for user, lemma in sorted(simp_edges(messages, graph["nodes"]) - known): # edges the term missed
+        graph["edges"].append({"from": user, "to": lemma})
+    return graph

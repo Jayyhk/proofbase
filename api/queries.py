@@ -16,18 +16,11 @@ def store_proof_stats(conn, proof_id):
                     SELECT count(*) FROM graph_declaration d
                     WHERE d.proof_id = :id
                     AND NOT EXISTS (
-                        SELECT 1 FROM edge e
-                        JOIN graph_declaration f ON f.id = e.from_id
-                        WHERE e.to_id = d.id AND f.kind <> 'axiom'
+                        SELECT 1 FROM graph_edge ge WHERE ge.to_id = d.id
                     )
                 ),
                 -- edges between 2 real declarations (exclude axioms)
-                edges = (
-                    SELECT count(*) FROM edge e
-                    JOIN graph_declaration f ON f.id = e.from_id
-                    JOIN graph_declaration t ON t.id = e.to_id
-                    WHERE e.proof_id = :id AND f.kind <> 'axiom'
-                ),
+                edges = (SELECT count(*) FROM graph_edge WHERE proof_id = :id),
                 -- count axiom uses by risk kind
                 flagged = (SELECT count(*) FROM axiom_use WHERE proof_id = :id AND kind <> 'standard'),
                 sorry = (SELECT count(*) FROM axiom_use WHERE proof_id = :id AND kind = 'sorry'),
@@ -186,10 +179,9 @@ def get_declaration_neighbors(conn, declaration_id):
         conn.execute(
             text(f"""
             SELECT t.id, t.name, {severity_sql("t")}
-            FROM edge e
-            JOIN declaration f ON f.id = e.from_id
+            FROM graph_edge e
             JOIN graph_declaration t ON t.id = e.to_id
-            WHERE e.from_id = :id AND f.kind <> 'axiom'
+            WHERE e.from_id = :id
             ORDER BY severity DESC, t.name
         """),
             {"id": declaration_id}
@@ -201,10 +193,9 @@ def get_declaration_neighbors(conn, declaration_id):
         conn.execute(
             text(f"""
             SELECT f.id, f.name, {severity_sql("f")}
-            FROM edge e
+            FROM graph_edge e
             JOIN graph_declaration f ON f.id = e.from_id
-            JOIN declaration t ON t.id = e.to_id
-            WHERE e.to_id = :id AND f.kind <> 'axiom'
+            WHERE e.to_id = :id
             ORDER BY severity DESC, f.name
         """),
             {"id": declaration_id}
@@ -236,11 +227,7 @@ def get_proof_graph(conn, proof_id):
     edges = (
         conn.execute(
             text("""
-            SELECT e.from_id, e.to_id
-            FROM edge e
-            JOIN graph_declaration f ON f.id = e.from_id
-            JOIN graph_declaration t ON t.id = e.to_id
-            WHERE e.proof_id = :proof_id AND f.kind <> 'axiom'
+            SELECT from_id, to_id FROM graph_edge WHERE proof_id = :proof_id
         """),
             {"proof_id": proof_id}
         )
