@@ -71,11 +71,12 @@ def error_text(messages):
 
 
 # a simp lemma proved by rfl leaves no trace in the proof term, so the extractor misses it
-SIMP_TRACE = re.compile(r"\[Meta\.Tactic\.simp\.rewrite\]\s+([A-Za-z_][\w.'\u2019]*)")
+# simp reports a lemma by name, and a definition it unfolded as "unfold <name>"
+SIMP_TRACE = re.compile(r"\[Meta\.Tactic\.simp\.rewrite\]\s+(?:unfold\s+)?([A-Za-z_][\w.'\u2019]*)")
 
 
-# the lemmas simp used, paired with the declaration that used them.
-# the trace names the lemma, the position tells us who it was for
+# the lemmas simp used, paired with the declaration that used them
+# the trace names the lemma, the position says who used it
 def simp_edges(messages, nodes):
     owned = {n["name"] for n in nodes}
     # smallest range first, so the innermost declaration wins
@@ -86,13 +87,13 @@ def simp_edges(messages, nodes):
 
     edges = set()
     for message in messages:
-        lemma = SIMP_TRACE.search(message.get("data", ""))
-        if lemma is None or lemma.group(1) not in owned:
-            continue # a mathlib lemma, we only graph the proof's own
         at = message.get("pos", {}).get("line")
         user = next((name for lo, hi, name in ranges if lo <= at <= hi), None)
-        if user is not None and user != lemma.group(1): # no self loops
-            edges.add((user, lemma.group(1)))
+        if user is None:
+            continue
+        for lemma in SIMP_TRACE.findall(message.get("data", "")): # one message can hold several
+            if lemma in owned and lemma != user: # only the proof's own, and no self loops
+                edges.add((user, lemma))
     return edges
 
 
