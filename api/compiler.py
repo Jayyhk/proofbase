@@ -1,7 +1,6 @@
 import json
 import os
 import re
-import signal
 import subprocess
 from pathlib import Path
 
@@ -9,7 +8,6 @@ ROOT = Path(__file__).resolve().parent.parent # repo root
 COMPILE_ENV = ROOT / "compile-env"
 EXTRACTOR = COMPILE_ENV / "extract.lean"
 ELAN_BIN = str(Path.home() / ".elan" / "bin")
-TIMEOUT = 300 # compile timeout, seconds
 
 
 # no extra behavior except subclassing Exception so we can raise CompileError
@@ -28,21 +26,10 @@ def run(args, cwd):
     # copy env vars and put elan's bin dir on PATH so lake/lean are found
     env = {**os.environ, "PATH": ELAN_BIN + os.pathsep + os.environ.get("PATH", "")}
 
-    proc = subprocess.Popen( # start command
+    return subprocess.run( # run to completion, however long it takes
         args, cwd=cwd, env=env, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
-    try:
-        out, err = proc.communicate(timeout=TIMEOUT) # finish and collect output, give up after TIMEOUT seconds
-    except subprocess.TimeoutExpired: # ran too long, try to kill it
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL) # try to kill whole process group
-        except ProcessLookupError:
-            pass # nothing to do, already exited
-        proc.communicate() # collect whatever's left and let the OS clean up dead process
-        raise CompileError(f"compilation timed out after {TIMEOUT // 60} minutes")
-
-    return subprocess.CompletedProcess(args, proc.returncode, out, err) # finished in time
 
 
 # drop lake's "trace:" lines
