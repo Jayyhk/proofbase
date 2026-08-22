@@ -93,7 +93,7 @@ def compile_and_extract(file, version):
     upload.write_text(file) # write the uploaded proof into Upload.lean
     olean.parent.mkdir(parents=True, exist_ok=True) # lake makes this, but not on a fresh box
 
-    build = run(["lake", "env", "lean", "--json", "-D", "trace.Meta.Tactic.simp.rewrite=true", "-o", str(olean), "Upload.lean"], env_dir) # compile the proof
+    build = run(["lake", "env", "lean", "--json", "-D", "maxHeartbeats=0", "-D", "trace.Meta.Tactic.simp.rewrite=true", "-o", str(olean), "Upload.lean"], env_dir) # compile the proof
     messages = parse_messages(build)
     if build.returncode != 0:
         raise CompileError(error_text(messages) or clean_output(build))
