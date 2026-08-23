@@ -99,6 +99,7 @@ LEFT JOIN axiom_policy pol ON pol.name = ax.name;
 CREATE VIEW graph_declaration AS
 SELECT * FROM declaration d
 WHERE NOT d.is_generated -- extract.lean decides this
+  AND d.kind IN ('theorem', 'axiom') -- no defs
   AND d.name NOT IN (SELECT name FROM axiom_policy); -- skip known axioms
 
 -- edges to draw. a dependency can pass through a declaration that graph_declaration hides, so step over those to the next visible one
