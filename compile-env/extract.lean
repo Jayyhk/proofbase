@@ -13,6 +13,9 @@ def kindOf : ConstantInfo -> String
   | .ctorInfo _ => "ctor"
   | .recInfo _ => "rec"
 
+-- declaration name
+def shownName (n : Name) : Name := (privateToUserName? n).getD n
+
 -- a read only environment for the compiled declarations
 abbrev EnvM := ReaderT Environment Id
 
@@ -106,13 +109,14 @@ def nodeJson (env : Environment) (ax : AxCache)
     (name : Name) (info : ConstantInfo) : IO Json := do
   let (axs, _) <- footprint env ax {} name
   let r := rangeOf env name
+  let shown := shownName name
   return Json.mkObj [
-    ("name", toJson name.toString),
+    ("name", toJson shown.toString),
     ("kind", toJson (kindOf info)),
-    ("generated", toJson (name.isInternalDetail || isDerived env name)),
+    ("generated", toJson (shown.isInternalDetail || isDerived env name)),
     ("lineStart", match r with | some r => toJson r.pos.line | none => Json.null),
     ("lineEnd", match r with | some r => toJson r.endPos.line | none => Json.null),
-    ("axioms", toJson ((axs.toList.filter (· != name)).map Name.toString).toArray)
+    ("axioms", toJson ((axs.toList.filter (· != name)).map (shownName · |>.toString)).toArray)
   ]
 
 -- read a file, none if it's missing
@@ -169,8 +173,8 @@ def main (args : List String) : IO Unit := do
       refs := refs.insert dep
       if dep != name && isOwn roots (moduleOf env mods dep) then
         edges := edges.push <| Json.mkObj [
-          ("from", toJson name.toString),
-          ("to", toJson dep.toString)
+          ("from", toJson (shownName name).toString),
+          ("to", toJson (shownName dep).toString)
         ]
   -- add external axioms (e.g. Classical.choice) as nodes and skip other library constants
   let mut externals := 0

@@ -66,6 +66,11 @@ SIMP_TRACE = re.compile(r"\[Meta\.Tactic\.simp\.rewrite\]\s+(?:unfold\s+)?([A-Za
 # the trace names the lemma, the position says who used it
 def simp_edges(messages, nodes):
     owned = {n["name"] for n in nodes}
+    by_suffix = {}
+    for name in owned:
+        parts = name.split(".")
+        for i in range(len(parts)):
+            by_suffix.setdefault(".".join(parts[i:]), []).append(name)
     # smallest range first, so the innermost declaration wins
     ranges = sorted(
         ((n["lineStart"], n["lineEnd"] or n["lineStart"], n["name"]) for n in nodes if n["lineStart"]),
@@ -79,9 +84,22 @@ def simp_edges(messages, nodes):
         if user is None:
             continue
         for lemma in SIMP_TRACE.findall(message.get("data", "")): # one message can hold several
-            if lemma in owned and lemma != user: # only the proof's own, and no self loops
-                edges.add((user, lemma))
+            candidates = by_suffix.get(lemma, [])
+            if len(candidates) > 1 and user: # ambiguous suffix: the nearest namespace wins
+                candidates = sorted(candidates, key=lambda c: -shared_prefix(c, user))
+            full = candidates[0] if candidates else None
+            if full and full != user: # only the proof's own, and no self loops
+                edges.add((user, full))
     return edges
+
+
+# how many leading dotted components two names share, for picking between same-suffix candidates
+def shared_prefix(a, b):
+    a, b = a.split("."), b.split(".")
+    n = 0
+    while n < min(len(a), len(b)) and a[n] == b[n]:
+        n += 1
+    return n
 
 
 # write the proof, compile it, run the extractor, return graph json
