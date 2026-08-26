@@ -103,7 +103,7 @@ def shared_prefix(a, b):
 
 
 # write the proof, compile it, run the extractor, return graph json
-def compile_and_extract(file, version):
+def compile_and_extract(file, version, simp_trace=False):
     env_dir = COMPILE_ENV / version # lean version dir
     upload = env_dir / "Upload.lean"
     out = env_dir / ".upload.json"
@@ -111,7 +111,10 @@ def compile_and_extract(file, version):
     upload.write_text(file) # write the uploaded proof into Upload.lean
     olean.parent.mkdir(parents=True, exist_ok=True) # lake makes this, but not on a fresh box
 
-    build = run(["lake", "env", "lean", "--json", "-D", "maxHeartbeats=0", "-D", "trace.Meta.Tactic.simp.rewrite=true", "-o", str(olean), "Upload.lean"], env_dir) # compile the proof
+    flags = ["-D", "maxHeartbeats=0"]
+    if simp_trace:
+        flags += ["-D", "trace.Meta.Tactic.simp.rewrite=true"]
+    build = run(["lake", "env", "lean", "--json", *flags, "-o", str(olean), "Upload.lean"], env_dir) # compile the proof
     messages = parse_messages(build)
     if build.returncode != 0:
         raise CompileError(error_text(messages) or clean_output(build))
