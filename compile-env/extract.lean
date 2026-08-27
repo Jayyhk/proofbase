@@ -105,10 +105,10 @@ def optStr : Option String -> Json
   | none => Json.null
 
 -- builds one declaration's json metadata
-def nodeJson (env : Environment) (ax : AxCache)
+def nodeJson (env : Environment) (ax : AxCache) (own : Bool)
     (name : Name) (info : ConstantInfo) : IO Json := do
   let (axs, _) <- footprint env ax {} name
-  let r := rangeOf env name
+  let r := if own then rangeOf env name else none
   let shown := shownName name
   return Json.mkObj [
     ("name", toJson shown.toString),
@@ -159,7 +159,7 @@ def main (args : List String) : IO Unit := do
   for (name, info) in env.constants do
     if !isOwn roots (moduleOf env mods name) then
       continue
-    nodes := nodes.push (<- nodeJson env ax name info)
+    nodes := nodes.push (<- nodeJson env ax true name info)
     let (fp, _) <- footprint env ax {} name
     -- if --verify then cross-check our footprint against Lean's collector
     if verify && (fp.toList.map Name.toString).toArray.qsort (· < ·)
@@ -184,7 +184,7 @@ def main (args : List String) : IO Unit := do
     let some info := env.find? r | continue
     if !(info matches .axiomInfo _) then
       continue
-    nodes := nodes.push (<- nodeJson env ax r info)
+    nodes := nodes.push (<- nodeJson env ax false r info)
     externals := externals + 1
   IO.eprintln s!"environment: {env.constants.fold (fun n _ _ => n + 1) 0}"
   IO.eprintln s!"modules: {roots.size} nodes: {nodes.size} (external axioms: {externals}) \
