@@ -116,6 +116,31 @@ for i, (name, generated, start, end) in decls.items():
     dead[name] = span
 
 TOKEN = re.compile(r"[^\W\d][\w.'!?₀-₉]*")
+MUTUAL = re.compile(r"^mutual\b")
+BARE_END = re.compile(r"^end\s*$")
+blocks, b = [], 0
+while b < len(lines):
+    if MUTUAL.match(lines[b]):
+        j = b + 1
+        while j < len(lines) and not BARE_END.match(lines[j]):
+            j += 1
+        if j < len(lines):
+            blocks.append((b + 1, j + 1))
+        b = j
+    b += 1
+
+merged = 0
+for m, e in blocks:
+    inside = [n for n, s in dead.items() if m < min(s) and max(s) < e]
+    members = [d for d in decls.values() if d[2] and m < d[2] < e]
+    for n in inside:
+        del dead[n]
+    if members and len(inside) == len(members):
+        dead["\x00".join(inside)] = set(range(m, e + 1))
+        merged += 1
+if blocks:
+    print(f"mutual blocks {len(blocks)}  dropped whole {merged}, kept intact {len(blocks) - merged}")
+
 rescued, drop, rounds = set(), set(), 0
 while True:
     rounds += 1
@@ -125,7 +150,8 @@ while True:
         if i in drop:
             continue
         named.update(part for t in TOKEN.findall(line) for part in t.split("."))
-    fresh = {n for n in dead if n not in rescued and n.split(".")[-1] in named}
+    fresh = {n for n in dead if n not in rescued
+             and any(part.split(".")[-1] in named for part in n.split("\x00"))}
     if not fresh:
         break
     rescued |= fresh
@@ -141,8 +167,17 @@ print(f"dropped {len(drop):,} lines")
 NAMESPACE = re.compile(r"^namespace ")
 SECTION = re.compile(r"^(noncomputable\s+)?section\b")
 END = re.compile(r"^end(\s+[A-Za-z_].*)?$")
+OPEN = re.compile(r"^\s*(?:open|export)\s+(?:scoped\s+)?(.*)$")
+NAME = re.compile(r"[A-Za-z_][\w.']*")
 emptied = 0
 for _ in range(10):
+    opened_names = set()
+    for line in lines:
+        m = OPEN.match(line)
+        if m:
+            for tok in NAME.findall(re.sub(r"\bin\b.*$", "", m.group(1).split("--")[0])):
+                opened_names.add(tok)
+                opened_names.update(tok.split("."))
     stack, kill, comment = [], set(), 0
     for i, line in enumerate(lines, 1):
         inside = comment > 0
@@ -153,13 +188,17 @@ for _ in range(10):
             stack.append(["namespace", i, False])
         elif SECTION.match(line):
             stack.append(["section", i, False])
+        elif MUTUAL.match(line):
+            stack.append(["mutual", i, False])
         elif END.match(line):
             if not stack:
                 print(f"  warning: unmatched end at line {i}")
                 continue
             kind, opened, occupied = stack.pop()
             if kind == "namespace" and not occupied:
-                kill |= {opened, i}
+                ns = lines[opened - 1].split()[1]
+                if ns not in opened_names and ns.split(".")[-1] not in opened_names:
+                    kill |= {opened, i}
             if stack and occupied:
                 stack[-1][2] = True
         elif stack and line.strip():
