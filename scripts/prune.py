@@ -115,7 +115,7 @@ for i, (name, generated, start, end) in decls.items():
         k -= 1
     dead[name] = span
 
-TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_.'!?₀-₉]*")
+TOKEN = re.compile(r"[^\W\d][\w.'!?₀-₉]*")
 rescued, drop, rounds = set(), set(), 0
 while True:
     rounds += 1
