@@ -69,6 +69,11 @@ def is_instance(start):
 
 
 def tagged(start):
+    for line in lines[start - 1:start + 15]:
+        if ATTRIBUTE.match(line):
+            return True
+        if FIRST_KEYWORD.search(line):
+            break
     k = start
     while k >= 1:
         line = lines[k - 1]
