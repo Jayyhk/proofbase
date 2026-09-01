@@ -110,8 +110,14 @@ for i, (name, generated, start, end) in decls.items():
         continue
     span = set(range(start, end + 1))
     k = start - 1
-    while k >= 1 and MODIFIER.match(lines[k - 1]):
-        span.add(k)
+    while k >= 1:
+        line = lines[k - 1]
+        if MODIFIER.match(line):
+            span.add(k)
+        elif line.strip().startswith("--") or not line.strip():
+            span.add(k)
+        else:
+            break
         k -= 1
     dead[name] = span
 
@@ -179,6 +185,7 @@ for _ in range(10):
                 opened_names.add(tok)
                 opened_names.update(tok.split("."))
     stack, kill, comment = [], set(), 0
+    empties, occupied_at = [], {}
     for i, line in enumerate(lines, 1):
         inside = comment > 0
         comment = max(0, comment + line.count("/-") - line.count("-/"))
@@ -195,14 +202,21 @@ for _ in range(10):
                 print(f"  warning: unmatched end at line {i}")
                 continue
             kind, opened, occupied = stack.pop()
-            if kind == "namespace" and not occupied:
+            if kind == "namespace":
                 ns = lines[opened - 1].split()[1]
-                if ns not in opened_names and ns.split(".")[-1] not in opened_names:
-                    kill |= {opened, i}
+                if occupied:
+                    occupied_at.setdefault(ns, opened)
+                else:
+                    empties.append((ns, opened, i))
             if stack and occupied:
                 stack[-1][2] = True
         elif stack and line.strip():
             stack[-1][2] = True
+    for ns, opened, closed in empties:
+        if occupied_at.get(ns, opened) < opened:
+            kill |= {opened, closed}
+        elif ns not in opened_names and ns.split(".")[-1] not in opened_names:
+            kill |= {opened, closed}
     if stack:
         print(f"  warning: {len(stack)} scopes left open")
     if not kill:
