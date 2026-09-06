@@ -111,17 +111,18 @@ def compile_and_extract(file, version, simp_trace=False):
     upload.write_text(file) # write the uploaded proof into Upload.lean
     olean.parent.mkdir(parents=True, exist_ok=True) # lake makes this, but not on a fresh box
 
-    flags = ["-D", "maxHeartbeats=0"]
+    flags = ["--tstack=1048576", "-D", "maxHeartbeats=0", "-D", "maxErrors=0"]
     if simp_trace:
         flags += ["-D", "trace.Meta.Tactic.simp.rewrite=true"]
     build = run(["lake", "env", "lean", "--json", *flags, "-o", str(olean), "Upload.lean"], env_dir) # compile the proof
     messages = parse_messages(build)
     if build.returncode != 0:
-        raise CompileError(error_text(messages) or clean_output(build))
+        raise CompileError(error_text(messages) or clean_output(build) or f"lean exited with code {build.returncode} and no output")
 
-    extract = run(["lake", "env", "lean", "--run", str(EXTRACTOR), "-o", str(out), "Upload"], env_dir) # extract info from .olean files
+    extract = run(["lake", "env", "lean", "--tstack=1048576", "--run", str(EXTRACTOR), "-o", str(out), "Upload"], env_dir) # extract info from .olean files
     if extract.returncode != 0:
-        raise CompileError(clean_output(extract))
+        raise CompileError(clean_output(extract)
+                           or f"extractor exited with code {extract.returncode} and no output")
 
     graph = json.loads(out.read_text()) # parse json the extractor wrote
 
