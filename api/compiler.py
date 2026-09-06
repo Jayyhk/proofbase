@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -26,8 +27,10 @@ def run(args, cwd):
     # copy env vars and put elan's bin dir on PATH so lake/lean are found
     env = {**os.environ, "PATH": ELAN_BIN + os.pathsep + os.environ.get("PATH", "")}
 
+    command = "ulimit -s unlimited; exec " + shlex.join(args)
+
     return subprocess.run( # run to completion, however long it takes
-        args, cwd=cwd, env=env, text=True,
+        ["bash", "-c", command], cwd=cwd, env=env, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
 
