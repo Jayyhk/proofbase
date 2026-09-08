@@ -173,15 +173,26 @@ print(f"dropped {len(drop):,} lines")
 NAMESPACE = re.compile(r"^namespace ")
 SECTION = re.compile(r"^(noncomputable\s+)?section\b")
 END = re.compile(r"^end(\s+[A-Za-z_].*)?$")
-OPEN = re.compile(r"^\s*(?:open|export)\s+(?:scoped\s+)?(.*)$")
+OPEN = re.compile(r"^\s*(?:open|export)\b\s*(?:scoped\s+)?(.*)$") # \b not \s+: a bare `open` continues on the next lines
 NAME = re.compile(r"[A-Za-z_][\w.']*")
+CONT = re.compile(r"^\s+[A-Za-z_][\w.']*\s*$") # a namespace on its own line after a bare `open`
 emptied = 0
 for _ in range(10):
     opened_names = set()
-    for line in lines:
+    for i, line in enumerate(lines):
         m = OPEN.match(line)
         if m:
-            for tok in NAME.findall(re.sub(r"\bin\b.*$", "", m.group(1).split("--")[0])):
+            payload = m.group(1)
+            # `open` with nothing after it continues on the following lines, one
+            # namespace per line.  without this the names are never collected and the
+            # namespace looks unopened, so an emptied one gets deleted out from under
+            # a live `open`, leaving `unknown namespace`.
+            if not payload.strip():
+                j = i + 1
+                while j < len(lines) and CONT.match(lines[j]):
+                    payload += " " + lines[j]
+                    j += 1
+            for tok in NAME.findall(re.sub(r"\bin\b.*$", "", payload.split("--")[0])):
                 opened_names.add(tok)
                 opened_names.update(tok.split("."))
     stack, kill, comment = [], set(), 0
