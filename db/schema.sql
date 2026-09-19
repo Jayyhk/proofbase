@@ -6,7 +6,6 @@ CREATE TABLE proof (
     name text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     lean_version text,
-    simp_trace boolean NOT NULL DEFAULT false,
     declarations integer NOT NULL DEFAULT 0,
     roots integer NOT NULL DEFAULT 0,
     edges integer NOT NULL DEFAULT 0,

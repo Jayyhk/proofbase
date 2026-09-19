@@ -41,12 +41,12 @@ def proofs():
 
 
 # function run in a background thread that does the compilation
-def run_compile(proof_id, file, version, simp_trace=False):
+def run_compile(proof_id, file, version):
     with compile_lock: # sequential
         with engine.begin() as conn:
             queries.mark_proof_compiling(conn, proof_id) # status: queued->compiling
         try:
-            graph = compile_and_extract(file, version, simp_trace) # compile the Lean, run extractor to get proof json
+            graph = compile_and_extract(file, version) # compile the Lean, run extractor to get proof json
             with engine.begin() as conn:
                 ingest_proof(conn, proof_id, graph) # load the proof, stats, svg, into the db. status: compiling->ready
         except CompileError as e:
@@ -72,10 +72,9 @@ def compile_proof():
         return {"error": "missing 'file'"}, 400
     if version not in supported_versions():
         return {"error": f"unsupported Lean version: {version}"}, 400
-    simp_trace = bool(body.get("simp_trace", False)) # recover rfl-closing simp edges, at a large cost
     with engine.begin() as conn:
-        proof_id = queries.create_queued_proof(conn, name, f"leanprover/lean4:v{version}", file, simp_trace) # insert the queued proof, get its id
-    threading.Thread(target=run_compile, args=(proof_id, file, version, simp_trace), daemon=True).start() # spawn a thread running run_compile
+        proof_id = queries.create_queued_proof(conn, name, f"leanprover/lean4:v{version}", file) # insert the queued proof, get its id
+    threading.Thread(target=run_compile, args=(proof_id, file, version), daemon=True).start() # spawn a thread running run_compile
     return {"name": name, "proof_id": proof_id, "status": "queued"}, 201 # return name and proof_id and use 201 Created
 
 

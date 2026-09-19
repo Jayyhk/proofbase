@@ -98,21 +98,32 @@ def isDerived (env : Environment) (n : Name) : Bool := Id.run do
 def instanceNames (env : Environment) : NameSet :=
   Meta.instanceExtension.getState env |>.instanceNames.foldl (fun s n _ => s.insert n) {}
 
--- the conclusion of a declaration's type, after its binders
+-- what a type or a definition ends in, after its binders
 def conclusion : Expr -> Expr
   | .forallE _ _ b _ => conclusion b
+  | .lam _ _ b _ => conclusion b
   | .letE _ _ _ b _ => conclusion b
   | e => e
 
+-- does this type end in a class?  `abbrev ShinyAlias a := Shiny a` hides one behind a
+-- definition, so reducible definitions are unfolded on the way
+partial def endsInClass (env : Environment) (fuel : Nat) (type : Expr) : Bool :=
+  match fuel with
+  | 0 => false
+  | fuel + 1 =>
+    match (conclusion type).getAppFn.constName? with
+    | none => false
+    | some head =>
+      if isClass env head then true
+      else match env.find? head with
+        | some (.defnInfo v) => v.hints matches .abbrev && endsInClass env fuel v.value
+        | _ => false
+
 -- an instance the file declares.  the table above only holds the globally active ones, so a
--- `scoped instance` is missing from it; `instance` also marks the declaration
--- instance-reducible, and anything whose conclusion is a class is used the same way.
+-- `scoped instance` is missing from it, but anything whose type ends in a class is reached
+-- the same way and has to be kept
 def isInstanceLike (env : Environment) (insts : NameSet) (n : Name) (info : ConstantInfo) : Bool :=
-  insts.contains n
-    || (getReducibilityStatus (m := EnvM) n).run env matches .instanceReducible
-    || match (conclusion info.type).getAppFn.constName? with
-       | some head => isClass env head
-       | none => false
+  insts.contains n || endsInClass env 8 info.type
 
 -- every declaration registered in a simp set (simp itself, push_cast, field_simps, the
 -- aesop sets, ...).  `simp` can use these without the proof term ever naming them, and the

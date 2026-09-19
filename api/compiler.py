@@ -106,7 +106,7 @@ def shared_prefix(a, b):
 
 
 # write the proof, compile it, run the extractor, return graph json
-def compile_and_extract(file, version, simp_trace=False):
+def compile_and_extract(file, version):
     env_dir = COMPILE_ENV / version # lean version dir
     upload = env_dir / "Upload.lean"
     out = env_dir / ".upload.json"
@@ -114,15 +114,14 @@ def compile_and_extract(file, version, simp_trace=False):
     upload.write_text(file) # write the uploaded proof into Upload.lean
     olean.parent.mkdir(parents=True, exist_ok=True) # lake makes this, but not on a fresh box
 
-    flags = ["--tstack=1048576", "-D", "maxHeartbeats=0", "-D", "maxErrors=0"]
-    if simp_trace:
-        flags += ["-D", "trace.Meta.Tactic.simp.rewrite=true"]
+    flags = ["-D", "maxHeartbeats=0", "-D", "maxErrors=0",
+             "-D", "trace.Meta.Tactic.simp.rewrite=true"]
     build = run(["lake", "env", "lean", "--json", *flags, "-o", str(olean), "Upload.lean"], env_dir) # compile the proof
     messages = parse_messages(build)
     if build.returncode != 0:
         raise CompileError(error_text(messages) or clean_output(build) or f"lean exited with code {build.returncode} and no output")
 
-    extract = run(["lake", "env", "lean", "--tstack=1048576", "--run", str(EXTRACTOR), "-o", str(out), "Upload"], env_dir) # extract info from .olean files
+    extract = run(["lake", "env", "lean", "--run", str(EXTRACTOR), "-o", str(out), "Upload"], env_dir) # extract info from .olean files
     if extract.returncode != 0:
         raise CompileError(clean_output(extract)
                            or f"extractor exited with code {extract.returncode} and no output")

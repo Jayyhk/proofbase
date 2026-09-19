@@ -32,11 +32,7 @@ with engine.connect() as conn:
         (r.from_id, r.to_id)
         for r in conn.execute(text("SELECT from_id, to_id FROM edge WHERE proof_id = :p"), {"p": proof_id})
     ]
-    row = conn.execute(
-        text("SELECT file, simp_trace FROM proof WHERE id = :p"), {"p": proof_id}
-    ).mappings().first()
-    stored = row["file"] if row else None
-    traced = bool(row["simp_trace"]) if row else False
+    stored = conn.execute(text("SELECT file FROM proof WHERE id = :p"), {"p": proof_id}).scalar()
 
 if stored is None:
     sys.exit(f"no proof {proof_id}")
@@ -71,10 +67,12 @@ while stack:
 MODIFIER = re.compile(r"^\s*(omit|set_option|open|attribute|include|variable|local\s+\w+)\b.*\bin\s*$")
 MODIFIER_HEAD = re.compile(r"^\s*(omit|set_option|open|attribute|include|variable|local\s+\w+)\b")
 ENDS_IN = re.compile(r"\bin\s*$")
-NAMESPACE = re.compile(r"^namespace ")
-SECTION = re.compile(r"^(noncomputable\s+)?section\b")
+NAMESPACE = re.compile(r"^(?:@\[[^\]]*\]\s*)?(?:(?:private|protected|public|meta)\s+)*namespace ")
+SECTION = re.compile(r"^(?:@\[[^\]]*\]\s*)?(?:(?:noncomputable|private|protected|public|meta)\s+)*section\b")
 MUTUAL = re.compile(r"^mutual\b")
 END = re.compile(r"^end(\s+[A-Za-z_].*)?$")
+NAMESPACE_NAME = re.compile(r"^(?:@\[[^\]]*\]\s*)?(?:(?:private|protected|public|meta)\s+)*namespace\s+(\S+)")
+SECTION_NAME = re.compile(r"^(?:@\[[^\]]*\]\s*)?(?:(?:noncomputable|private|protected|public|meta)\s+)*section\s+(\S+)\s*$")
 
 
 def modifier_head(k):
@@ -94,9 +92,11 @@ FIRST_KEYWORD = re.compile(rf"(?:^|\s)({KEYWORD})\s")
 ATTRIBUTE = re.compile(r"^\s*@\[")
 
 
-def blank_code(src):
+def blank_code(src, depths=None):
     out, depth = [], 0
     for line in src:
+        if depths is not None:
+            depths.append(depth)
         buf, i, n = [], 0, len(line)
         while i < n:
             if depth:
@@ -110,6 +110,8 @@ def blank_code(src):
                 depth = 1; buf.append("  "); i += 2
             elif line.startswith("--", i):
                 buf.append(" " * (n - i)); i = n
+            elif line.startswith("'\"'", i):
+                buf.append("   "); i += 3
             elif line[i] == '"':
                 j = i + 1
                 while j < n and line[j] != '"':
@@ -122,11 +124,16 @@ def blank_code(src):
     return out
 
 
-BLANK = blank_code(lines)
+DEPTH = []
+BLANK = blank_code(lines, DEPTH)
 
 
 def code_window(start):
     return BLANK[start - 1:start + 15]
+
+
+def comment_only(k):
+    return not BLANK[k - 1].strip() and bool(lines[k - 1].strip())
 
 
 def declares(start, name):
@@ -151,8 +158,7 @@ def tagged(start):
             break
     k = start
     while k >= 1:
-        line = lines[k - 1]
-        if ATTRIBUTE.match(line):
+        if ATTRIBUTE.match(BLANK[k - 1]):
             return True
         if k == start:
             k -= 1
@@ -161,14 +167,8 @@ def tagged(start):
         if head is not None:
             k = head - 1
             continue
-        if line.strip().startswith("--") or not line.strip():
+        if comment_only(k) or not lines[k - 1].strip():
             k -= 1
-            continue
-        if line.rstrip().endswith("-/"):
-            j = k
-            while j >= 1 and "/-" not in lines[j - 1]:
-                j -= 1
-            k = j - 1
             continue
         return False
     return False
@@ -191,16 +191,23 @@ for i, (name, generated, start, end) in decls.items():
     if not declares(start, name):
         untrusted += 1
         continue
-    span = set(range(start, end + 1))
+    span = set(range(start, (end or start) + 1))
     k = start - 1
     while k >= 1:
-        line = lines[k - 1]
         head = modifier_head(k)
         if head is not None:
             span.update(range(head, k + 1))
             k = head
-        elif line.strip().startswith("--") or not line.strip():
+        elif not lines[k - 1].strip():
             span.add(k)
+        elif comment_only(k):
+            j = k
+            while j > 1 and DEPTH[j - 1] and comment_only(j):
+                j -= 1
+            if DEPTH[j - 1] or not comment_only(j):
+                break
+            span.update(range(j, k + 1))
+            k = j
         else:
             break
         k -= 1
@@ -233,23 +240,20 @@ if blocks:
 
 
 def namespace_by_line(src):
-    out, stack, comment = [], [], 0
+    out, stack = [], []
     for line in src:
-        inside = comment > 0
-        comment = max(0, comment + line.count("/-") - line.count("-/"))
         out.append(".".join(stack))
-        if inside:
-            continue
-        if NAMESPACE_DECL.match(line):
-            stack.extend(line.split()[1].split("."))
-        elif END_NAMED.match(line):
-            for _ in line.split()[1].split("."):
+        opened = NAMESPACE_NAME.match(line)
+        closed = END_NAMED.match(line)
+        if opened:
+            stack.extend(opened.group(1).split("."))
+        elif closed:
+            for _ in closed.group(1).split("."):
                 if stack:
                     stack.pop()
     return out
 
 
-NAMESPACE_DECL = re.compile(r"^namespace\s+(\S+)")
 END_NAMED = re.compile(r"^end\s+(\S+)\s*$")
 NS_AT = namespace_by_line(BLANK)
 
@@ -268,7 +272,7 @@ def shared_prefix(a, b):
     return n
 
 
-rescued, drop, rounds, saved_by = set(), set(), 0, {}
+rescued, drop, rounds, saved_by, clashed = set(), set(), 0, {}, set()
 while True:
     rounds += 1
     drop = set().union(set(), *(s for n, s in dead.items() if n not in rescued))
@@ -277,17 +281,26 @@ while True:
         if i in drop:
             continue
         for t in TOKEN.findall(line):
-            short = t.split(".")[-1]
-            if (i, short) in own_header:
-                continue
-            candidates = [c for c in by_short.get(short, [])
-                          if t.count(".") == 0 or c.endswith("." + t) or c == t]
-            if not candidates:
-                continue
-            best = max(shared_prefix(c, NS_AT[i - 1]) for c in candidates)
-            for c in candidates:
-                if shared_prefix(c, NS_AT[i - 1]) == best:
-                    named.setdefault(c, i)
+            parts = t.split(".")
+            for e in range(len(parts), 0, -1):
+                short = parts[e - 1]
+                if (i, short) in own_header:
+                    continue
+                pool = by_short.get(short)
+                if not pool:
+                    continue
+                candidates = []
+                for j in range(e):
+                    sub = ".".join(parts[j:e])
+                    candidates = [c for c in pool if c == sub or c.endswith("." + sub)]
+                    if candidates:
+                        break
+                if not candidates:
+                    continue
+                best = max(shared_prefix(c, NS_AT[i - 1]) for c in candidates)
+                for c in candidates:
+                    if shared_prefix(c, NS_AT[i - 1]) == best:
+                        named.setdefault(c, i)
     fresh = {}
     for n in dead:
         if n in rescued:
@@ -297,41 +310,42 @@ while True:
             if at is not None:
                 fresh[n] = (part, at)
                 break
-    if not fresh:
+    going = {part for n in dead if n not in rescued and n not in fresh for part in n.split("\x00")}
+    kept_lines = set()
+    for name, generated, start, end in decls.values():
+        if start and not generated and name not in going:
+            kept_lines.update(range(start, (end or start) + 1))
+    clash = {n for n, s in dead.items() if n not in rescued and n not in fresh and (s & kept_lines)}
+    if not fresh and not clash:
         break
-    rescued |= set(fresh)
+    rescued |= set(fresh) | clash
+    clashed |= clash
     saved_by.update(fresh)
+drop = set().union(set(), *(s for n, s in dead.items() if n not in rescued))
 
 if explain:
     for n in sorted(dead):
-        if n in rescued:
+        if n in saved_by:
             part, at = saved_by[n]
             print(f"  kept {part}: named on line {at}: {lines[at - 1].strip()[:90]}")
+        elif n in clashed:
+            print(f"  kept {n.replace(chr(0), ' + ')}: its lines overlap a declaration that stays")
         else:
             print(f"  dropping {n.replace(chr(0), ' + ')}")
 
-dropped_names = {part for n, s in dead.items() if n not in rescued for part in n.split("\x00")}
-kept_lines = set()
-for name, generated, start, end in decls.values():
-    if start and name not in dropped_names:
-        kept_lines.update(range(start, (end or start) + 1))
-overlap = drop & kept_lines
-if overlap:
-    drop -= overlap
-    print(f"  kept {len(overlap)} lines where a dead span overlapped a live declaration")
+if clashed:
+    print(f"  {len(clashed)} kept because their lines overlap a declaration that stays")
 
 if unused_magic:
     kinds = collections.Counter(k for _, k in unused_magic)
     print("  nothing uses " + ", ".join(f"{n} {k}{'s' if n > 1 else ''}" for k, n in kinds.items())
           + " -- kept because simp and typeclass resolution find them without a name")
 
-if rescued and not traced:
-    print(f"  {len(rescued)} kept only because the text still names them; this graph was built "
-          f"without simp tracing, so a lemma simp closed by rfl has no edge. re-upload with "
-          f"simp_trace to prune those")
+if saved_by:
+    print(f"  {len(saved_by)} kept only because the text still names them")
 
 print(f"declarations {len(decls)}  reachable {len(reachable)}  dead {len(dead)}  "
-      f"rescued by name {len(rescued)} in {rounds} rounds"
+      f"rescued by name {len(saved_by)} in {rounds} rounds"
       + (f"  kept {attributed} attribute-carrying" if attributed else "")
       + (f", {instances} instances" if instances else "")
       + (f"  (skipped {untrusted} whose line range does not match their header)" if untrusted else ""))
@@ -343,31 +357,28 @@ NAME = re.compile(r"[A-Za-z_][\w.']*")
 CONT = re.compile(r"^\s+[A-Za-z_][\w.']*\s*$")
 emptied = 0
 for _ in range(10):
+    scan = blank_code(lines)
     opened_names = set()
-    for i, line in enumerate(lines):
+    for i, line in enumerate(scan):
         m = OPEN.match(line)
         if m:
             payload = m.group(1)
             if not payload.strip():
                 j = i + 1
-                while j < len(lines) and CONT.match(lines[j]):
-                    payload += " " + lines[j]
+                while j < len(scan) and CONT.match(scan[j]):
+                    payload += " " + scan[j]
                     j += 1
             for tok in NAME.findall(re.sub(r"\bin\b.*$", "", payload.split("--")[0])):
                 opened_names.add(tok)
                 opened_names.update(tok.split("."))
-    stack, kill, comment = [], set(), 0
+    stack, kill = [], set()
     empties, occupied_at = [], {}
-    for i, line in enumerate(lines, 1):
-        inside = comment > 0
-        comment = max(0, comment + line.count("/-") - line.count("-/"))
-        if inside:
-            continue
+    for i, line in enumerate(scan, 1):
         if NAMESPACE.match(line):
             if stack:
                 stack[-1][2] = True
             parent = next((e[3] for e in reversed(stack) if e[0] == "namespace"), "")
-            written = line.split()[1]
+            written = NAMESPACE_NAME.match(line).group(1)
             stack.append(["namespace", i, False, f"{parent}.{written}" if parent else written])
         elif SECTION.match(line):
             stack.append(["section", i, False, None])
@@ -379,14 +390,14 @@ for _ in range(10):
                 continue
             kind, opened, occupied, full = stack.pop()
             if kind == "namespace":
-                ns = lines[opened - 1].split()[1]
+                ns = NAMESPACE_NAME.match(scan[opened - 1]).group(1)
                 if occupied:
                     occupied_at.setdefault(full, opened)
                 else:
                     empties.append((ns, full, opened, i))
             if stack and occupied:
                 stack[-1][2] = True
-        elif stack and line.strip():
+        elif stack and lines[i - 1].strip():
             stack[-1][2] = True
     for ns, full, opened, closed in empties:
         if occupied_at.get(full, opened) < opened:
@@ -425,18 +436,15 @@ def modifier_at(src, k):
     return MODIFIER_HEAD.match(src[j - 1]) is not None
 
 
-def structural_problems(src):
-    problems, stack, comment = [], [], 0
+def structural_problems(raw):
+    src = blank_code(raw)
+    problems, stack = [], []
     for i, line in enumerate(src, 1):
-        inside = comment > 0
-        comment = max(0, comment + line.count("/-") - line.count("-/"))
-        if inside:
-            continue
         if NAMESPACE.match(line):
-            stack.append(("namespace", line.split()[1], i))
+            stack.append(("namespace", NAMESPACE_NAME.match(line).group(1), i))
         elif SECTION.match(line):
-            parts = line.split()
-            stack.append(("section", parts[1] if len(parts) > 1 else None, i))
+            named = SECTION_NAME.match(line)
+            stack.append(("section", named.group(1) if named else None, i))
         elif MUTUAL.match(line):
             stack.append(("mutual", None, i))
         elif END.match(line):

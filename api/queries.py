@@ -64,14 +64,14 @@ def get_proofs(conn):
 
 
 # create initial proof row with status="queued" and return its id
-def create_queued_proof(conn, name, lean_version, file, simp_trace=False):
+def create_queued_proof(conn, name, lean_version, file):
     return conn.execute(
         text("""
-            INSERT INTO proof (name, status, lean_version, simp_trace, file)
-            VALUES (:name, 'queued', :lean_version, :simp_trace, :file)
+            INSERT INTO proof (name, status, lean_version, file)
+            VALUES (:name, 'queued', :lean_version, :file)
             RETURNING id
         """),
-        {"name": name, "lean_version": lean_version, "simp_trace": simp_trace, "file": file}
+        {"name": name, "lean_version": lean_version, "file": file}
     ).scalar()
 
 
