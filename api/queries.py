@@ -11,10 +11,13 @@ def store_proof_stats(conn, proof_id):
                     SELECT count(*) FROM graph_declaration d
                     WHERE d.proof_id = :id
                 ),
-                -- roots = declarations where nothing points at them (exclude axioms)
+                -- roots = declarations where nothing points at them (exclude axioms).
+                -- an instance or simp lemma never has an incoming edge -- resolution and simp
+                -- find it by shape, not by name -- so counting them would hide the real number
                 roots = (
                     SELECT count(*) FROM graph_declaration d
                     WHERE d.proof_id = :id
+                    AND NOT d.is_instance AND NOT d.is_simp
                     AND NOT EXISTS (
                         SELECT 1 FROM graph_edge ge WHERE ge.to_id = d.id
                     )
@@ -61,14 +64,14 @@ def get_proofs(conn):
 
 
 # create initial proof row with status="queued" and return its id
-def create_queued_proof(conn, name, lean_version, file):
+def create_queued_proof(conn, name, lean_version, file, simp_trace=False):
     return conn.execute(
         text("""
-            INSERT INTO proof (name, status, lean_version, file)
-            VALUES (:name, 'queued', :lean_version, :file)
+            INSERT INTO proof (name, status, lean_version, simp_trace, file)
+            VALUES (:name, 'queued', :lean_version, :simp_trace, :file)
             RETURNING id
         """),
-        {"name": name, "lean_version": lean_version, "file": file}
+        {"name": name, "lean_version": lean_version, "simp_trace": simp_trace, "file": file}
     ).scalar()
 
 

@@ -1,3 +1,5 @@
+from collections import Counter
+
 from sqlalchemy import text
 
 from api.queries import get_proof_graph, store_proof_stats
@@ -5,6 +7,19 @@ from api.render import render_svg
 
 
 def ingest_proof(conn, proof_id, data):
+    # the graph has to be self-consistent before any of it is written: a duplicate name would
+    # trip the unique index and a dangling edge would raise KeyError below, both a long way
+    # from the cause
+    counts = Counter(n["name"] for n in data["nodes"])
+    duplicate = next((n for n, c in counts.items() if c > 1), None)
+    if duplicate:
+        raise ValueError(f"extractor reported {duplicate} twice")
+    known = set(counts)
+    for e in data["edges"]:
+        if e["from"] not in known or e["to"] not in known:
+            missing = e["from"] if e["from"] not in known else e["to"]
+            raise ValueError(f"edge {e['from']} -> {e['to']} names {missing}, which is not a declaration")
+
     # insert all declarations (nodes) in the db
     declarations = [
         {
@@ -12,6 +27,8 @@ def ingest_proof(conn, proof_id, data):
             "name": n["name"],
             "kind": n["kind"],
             "is_generated": n["generated"],
+            "is_instance": n.get("instance", False),
+            "is_simp": n.get("simp", False),
             "line_start": n["lineStart"],
             "line_end": n["lineEnd"],
         }
@@ -19,8 +36,10 @@ def ingest_proof(conn, proof_id, data):
     ]
     conn.execute(
         text("""
-            INSERT INTO declaration (proof_id, name, kind, is_generated, line_start, line_end)
-            VALUES (:proof_id, :name, :kind, :is_generated, :line_start, :line_end)
+            INSERT INTO declaration
+                (proof_id, name, kind, is_generated, is_instance, is_simp, line_start, line_end)
+            VALUES
+                (:proof_id, :name, :kind, :is_generated, :is_instance, :is_simp, :line_start, :line_end)
         """),
         declarations
     )

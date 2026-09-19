@@ -6,6 +6,7 @@ CREATE TABLE proof (
     name text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     lean_version text,
+    simp_trace boolean NOT NULL DEFAULT false,
     declarations integer NOT NULL DEFAULT 0,
     roots integer NOT NULL DEFAULT 0,
     edges integer NOT NULL DEFAULT 0,
@@ -27,6 +28,8 @@ CREATE TABLE declaration (
     name text NOT NULL,
     kind text NOT NULL,
     is_generated boolean NOT NULL DEFAULT false,
+    is_instance boolean NOT NULL DEFAULT false,
+    is_simp boolean NOT NULL DEFAULT false,
     line_start integer,
     line_end integer,
     UNIQUE (proof_id, name)
@@ -97,7 +100,11 @@ LEFT JOIN axiom_policy pol ON pol.name = ax.name;
 
 -- declarations to include in the graph view
 CREATE VIEW graph_declaration AS
-SELECT * FROM declaration d
+-- columns are listed rather than SELECT *: a view freezes its column list at creation, so
+-- `SELECT *` silently hides any column added to declaration later
+SELECT d.id, d.proof_id, d.name, d.kind, d.is_generated, d.is_instance, d.is_simp,
+       d.line_start, d.line_end
+FROM declaration d
 WHERE NOT d.is_generated -- extract.lean decides this
   AND d.kind IN ('theorem', 'axiom') -- no defs
   AND d.name NOT IN (SELECT name FROM axiom_policy); -- skip known axioms

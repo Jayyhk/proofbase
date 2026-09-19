@@ -74,7 +74,7 @@ def compile_proof():
         return {"error": f"unsupported Lean version: {version}"}, 400
     simp_trace = bool(body.get("simp_trace", False)) # recover rfl-closing simp edges, at a large cost
     with engine.begin() as conn:
-        proof_id = queries.create_queued_proof(conn, name, f"leanprover/lean4:v{version}", file) # insert the queued proof, get its id
+        proof_id = queries.create_queued_proof(conn, name, f"leanprover/lean4:v{version}", file, simp_trace) # insert the queued proof, get its id
     threading.Thread(target=run_compile, args=(proof_id, file, version, simp_trace), daemon=True).start() # spawn a thread running run_compile
     return {"name": name, "proof_id": proof_id, "status": "queued"}, 201 # return name and proof_id and use 201 Created
 

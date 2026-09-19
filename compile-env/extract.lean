@@ -87,17 +87,46 @@ def isDerived (env : Environment) (n : Name) : Bool := Id.run do
   -- internal Lean «...» names
   if n.toString.any (· == '«') then
     return true
-  -- an anonymous instance is named inst<TypeName>, the user would have named it themselves
-  if let .str _ s := n then
-    if s.startsWith "inst" then
-      match s.toList.drop 4 with
-      | c :: _ => if c.isUpper then return true
-      | [] => pure ()
   -- an attribute's lemma sits at the same source range as the declaration it came from
   let .str parent _ := n | return false
   let some pr := rangeOf env parent | return false
   let some r := rangeOf env n | return false
   return pr.pos.line <= r.pos.line && r.endPos.line <= pr.endPos.line
+
+-- `instance : Foo Bar := ...` is named instFooBar by Lean, but it is the user's declaration:
+-- the pruner has to keep it, because typeclass resolution finds it without naming it.
+def instanceNames (env : Environment) : NameSet :=
+  Meta.instanceExtension.getState env |>.instanceNames.foldl (fun s n _ => s.insert n) {}
+
+-- the conclusion of a declaration's type, after its binders
+def conclusion : Expr -> Expr
+  | .forallE _ _ b _ => conclusion b
+  | .letE _ _ _ b _ => conclusion b
+  | e => e
+
+-- an instance the file declares.  the table above only holds the globally active ones, so a
+-- `scoped instance` is missing from it; `instance` also marks the declaration
+-- instance-reducible, and anything whose conclusion is a class is used the same way.
+def isInstanceLike (env : Environment) (insts : NameSet) (n : Name) (info : ConstantInfo) : Bool :=
+  insts.contains n
+    || (getReducibilityStatus (m := EnvM) n).run env matches .instanceReducible
+    || match (conclusion info.type).getAppFn.constName? with
+       | some head => isClass env head
+       | none => false
+
+-- every declaration registered in a simp set (simp itself, push_cast, field_simps, the
+-- aesop sets, ...).  `simp` can use these without the proof term ever naming them, and the
+-- attribute can be attached far from the declaration by `attribute [simp] foo`, so this is
+-- the only reliable source.
+def simpNames (env : Environment) : IO NameSet := do
+  let mut s : NameSet := {}
+  for (_, ext) in (<- Meta.simpExtensionMapRef.get).toList do
+    let thms := ext.getState env
+    for o in thms.lemmaNames.toList do
+      s := s.insert o.key
+    for n in thms.toUnfold.toList do
+      s := s.insert n
+  return s
 
 -- converts an optional string into json (null if absent)
 def optStr : Option String -> Json
@@ -106,7 +135,7 @@ def optStr : Option String -> Json
 
 -- builds one declaration's json metadata
 def nodeJson (env : Environment) (ax : AxCache) (own : Bool)
-    (name : Name) (info : ConstantInfo) : IO Json := do
+    (insts simps : NameSet) (name : Name) (info : ConstantInfo) : IO Json := do
   let (axs, _) <- footprint env ax {} name
   let r := if own then rangeOf env name else none
   let shown := shownName name
@@ -116,6 +145,8 @@ def nodeJson (env : Environment) (ax : AxCache) (own : Bool)
     ("generated", toJson (shown.isInternalDetail || isDerived env name)),
     ("lineStart", match r with | some r => toJson r.pos.line | none => Json.null),
     ("lineEnd", match r with | some r => toJson r.endPos.line | none => Json.null),
+    ("instance", toJson (isInstanceLike env insts name info)),
+    ("simp", toJson (simps.contains name)),
     ("axioms", toJson ((axs.toList.filter (· != name)).map (shownName · |>.toString)).toArray)
   ]
 
@@ -136,8 +167,11 @@ def parseArgs : List String -> Bool × Option String × List String
   | a :: rest => let (v, o, m) := parseArgs rest; (v, o, a :: m)
 
 -- load the compiled proof, walk its declarations, and write the graph json (nodes, edges, axioms)
-def main (args : List String) : IO Unit := do
+-- unsafe because the instance and simp tables only exist if module initializers run, which
+-- importModules refuses to do without enableInitializersExecution
+unsafe def main (args : List String) : IO Unit := do
   initSearchPath (<- findSysroot)
+  enableInitializersExecution
   let (verify, outArg, mods) := parseArgs args
   let out := outArg.getD "graph.json"
   let toolchain <- readLine? "./lean-toolchain"
@@ -148,18 +182,20 @@ def main (args : List String) : IO Unit := do
   let proof := Json.mkObj [
     ("leanVersion", optStr toolchain)
   ]
-  let env <- importModules (roots.map fun r => { module := r }) {}
+  let env <- importModules (roots.map fun r => { module := r }) {} (loadExts := true)
   let mods := env.allImportedModuleNames
   let mut nodes := #[]
   let mut edges := #[]
   let mut refs : NameSet := {}
   let ax <- IO.mkRef {}
   let mut bad := 0
+  let insts := instanceNames env
+  let simps <- simpNames env
   -- walk every constant. only process the proof's own declarations
   for (name, info) in env.constants do
     if !isOwn roots (moduleOf env mods name) then
       continue
-    nodes := nodes.push (<- nodeJson env ax true name info)
+    nodes := nodes.push (<- nodeJson env ax true insts simps name info)
     let (fp, _) <- footprint env ax {} name
     -- if --verify then cross-check our footprint against Lean's collector
     if verify && (fp.toList.map Name.toString).toArray.qsort (· < ·)
@@ -184,7 +220,7 @@ def main (args : List String) : IO Unit := do
     let some info := env.find? r | continue
     if !(info matches .axiomInfo _) then
       continue
-    nodes := nodes.push (<- nodeJson env ax false r info)
+    nodes := nodes.push (<- nodeJson env ax false insts simps r info)
     externals := externals + 1
   IO.eprintln s!"environment: {env.constants.fold (fun n _ _ => n + 1) 0}"
   IO.eprintln s!"modules: {roots.size} nodes: {nodes.size} (external axioms: {externals}) \
