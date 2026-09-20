@@ -29,7 +29,7 @@ with engine.connect() as conn:
 
 if stored is None:
     sys.exit(f"no proof {proof_id}")
-if path.read_text() != stored:
+if open(path, newline="").read() != stored:
     sys.exit(f"{path} is not the file uploaded as proof {proof_id}")
 original = stored.splitlines()
 lines = list(original)
@@ -488,6 +488,7 @@ for line in out:
         sys.exit(f"refusing to write: line was rewritten, not deleted: {line!r}")
     i += 1
 
-path.write_text("\n".join(out) + "\n")
+ending = "\r\n" if "\r\n" in stored else "\n"
+path.write_text(ending.join(out) + ending, newline="")
 removed = len(original) - len(out)
 print(f"{len(original):,} -> {len(out):,} lines ({100 * removed / len(original):.1f}% removed)")
