@@ -1,3 +1,4 @@
+import gzip
 import os
 import threading
 
@@ -16,6 +17,26 @@ DIST = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 # Flask application object
 # any request under /assets/... is served from web/dist/assets/...
 app = Flask(__name__, static_folder=os.path.join(DIST, "assets"), static_url_path="/assets")
+
+# a proof's svg runs to a megabyte and a half of text, which gzips to a quarter of that.
+# below a kilobyte gzip's own header costs more than it saves -- {"ok": true} comes out longer
+COMPRESS_FROM = 1024
+
+
+@app.after_request
+def compress(response):
+    accepted = "gzip" in request.headers.get("Accept-Encoding", "")
+    compressible = response.content_type.startswith(("image/svg", "application/json", "text/"))
+    if (not accepted or not compressible
+            or response.content_length is None or response.content_length < COMPRESS_FROM
+            or "Content-Encoding" in response.headers):
+        return response
+    response.direct_passthrough = False # a static file streams by default, read it to compress it
+    response.set_data(gzip.compress(response.get_data(), 4)) # 4 gives most of the saving for half the cpu
+    response.headers["Content-Encoding"] = "gzip"
+    response.headers["Content-Length"] = response.content_length
+    response.headers.add("Vary", "Accept-Encoding")
+    return response
 
 
 ################### API routes

@@ -79,6 +79,8 @@ CREATE TABLE edge (
 
 -- the above primary key covers from_id lookups. this index makes the reverse (to_id) fast too
 CREATE INDEX ON edge (to_id);
+-- re-ingesting a proof deletes its edges by proof_id alone, which neither of the above can serve
+CREATE INDEX ON edge (proof_id);
 
 -- classifies every axiom each declaration uses by how risky it is
 -- "this declaration uses this specific axiom, whose risk is X"
@@ -110,19 +112,25 @@ WHERE NOT d.is_generated -- extract.lean decides this
 
 -- edges to draw. a dependency can pass through a declaration that graph_declaration hides, so step over those to the next visible one
 -- ex: A -> foo._proof_6 -> B becomes A -> B
-CREATE VIEW graph_edge AS
-WITH RECURSIVE step (proof_id, from_id, to_id) AS (
-        SELECT e.proof_id, e.from_id, e.to_id
+-- a function rather than a view: postgres cannot push a proof_id filter into a recursive term,
+-- so a view walks every proof in the table and throws away all but one
+CREATE FUNCTION graph_edges(pid bigint)
+RETURNS TABLE (proof_id bigint, from_id bigint, to_id bigint) AS $$
+WITH RECURSIVE visible AS (
+    SELECT d.id, d.kind FROM graph_declaration d WHERE d.proof_id = pid
+), step (from_id, to_id) AS (
+        SELECT e.from_id, e.to_id
         FROM edge e
-        JOIN graph_declaration f ON f.id = e.from_id
-        WHERE f.kind <> 'axiom' -- axioms depend on nothing
+        JOIN visible f ON f.id = e.from_id
+        WHERE e.proof_id = pid AND f.kind <> 'axiom' -- axioms depend on nothing
     UNION -- not UNION ALL, so a cycle can't loop forever
-        SELECT s.proof_id, s.from_id, e.to_id
+        SELECT s.from_id, e.to_id
         FROM step s
-        JOIN edge e ON e.from_id = s.to_id
-        WHERE NOT EXISTS (SELECT 1 FROM graph_declaration g WHERE g.id = s.to_id) -- only step over hidden ones
+        JOIN edge e ON e.from_id = s.to_id AND e.proof_id = pid
+        WHERE NOT EXISTS (SELECT 1 FROM visible g WHERE g.id = s.to_id) -- only step over hidden ones
 )
-SELECT DISTINCT proof_id, from_id, to_id
+SELECT DISTINCT pid, from_id, to_id
 FROM step
-WHERE EXISTS (SELECT 1 FROM graph_declaration g WHERE g.id = to_id) -- has to land on a visible one
+WHERE EXISTS (SELECT 1 FROM visible g WHERE g.id = to_id) -- has to land on a visible one
   AND from_id <> to_id; -- stepping over can lead back to the source
+$$ LANGUAGE sql STABLE; -- stepping over can lead back to the source
