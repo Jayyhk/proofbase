@@ -65,9 +65,19 @@ def error_text(messages):
 # simp reports a lemma by name, and a definition it unfolded as "unfold <name>"
 SIMP_TRACE = re.compile(r"\[Meta\.Tactic\.simp\.rewrite\]\s+(?:unfold\s+)?([A-Za-z_][\w.'\u2019]*)")
 
+# typeclass resolution finds an instance by the shape of the goal, and the elaborator can apply
+# it and then erase it: a coercion becomes the projection it unfolds to, so the proof term never
+# names the instance.  the trace names every step the search applied, and the tick marks the
+# ones that worked -- the file's own instance sits in the middle of a chain of core ones
+SYNTH_APPLY = re.compile(r"\[Meta\.synthInstance\.apply\] \u2705\ufe0f? apply @?([A-Za-z_][\w.'\u2019]*)")
 
-# the lemmas simp used, paired with the declaration that used them
-# the trace names the lemma, the position says who used it
+
+def traced_names(data):
+    return SIMP_TRACE.findall(data) + SYNTH_APPLY.findall(data)
+
+
+# the declarations the tactics used, paired with the declaration that used them
+# the trace names them, the position says who used them
 def simp_edges(messages, nodes):
     owned = {n["name"] for n in nodes}
     by_suffix = {}
@@ -87,7 +97,7 @@ def simp_edges(messages, nodes):
         user = next((name for lo, hi, name in ranges if lo <= at <= hi), None)
         if user is None:
             continue
-        for lemma in SIMP_TRACE.findall(message.get("data", "")): # one message can hold several
+        for lemma in traced_names(message.get("data", "")): # one message can hold several
             candidates = by_suffix.get(lemma, [])
             if len(candidates) > 1 and user: # ambiguous suffix: the nearest namespace wins
                 candidates = sorted(candidates, key=lambda c: -shared_prefix(c, user))
@@ -125,6 +135,35 @@ def ilean_edges(path, nodes):
     return edges
 
 
+# one command can write several declarations on the same lines: `@[to_additive]` derives an
+# additive twin, `notation` adds a macro rule, `deriving` an instance.  lean knows each of those
+# comes from the other, and the file cannot hold one without the other, so record it as a
+# dependency both ways -- otherwise the twin looks like a second conclusion of the proof
+def kin_edges(nodes):
+    spans = [(n["lineStart"], n["lineEnd"] or n["lineStart"], n["name"]) for n in nodes if n["lineStart"]]
+    edges = set()
+    for start, end, name in spans:
+        for other_start, other_end, other in spans:
+            if other == name:
+                continue
+            if other_start <= start and end <= other_end:
+                edges.add((name, other))
+                edges.add((other, name))
+    # `elab_rules` and `macro_rules` land in a declaration lean names after the syntax it
+    # implements, and the two can sit on different lines, so read the name it embeds
+    flat = {n["name"].replace(".", "_"): n["name"] for n in nodes}
+    for node in nodes:
+        aux = node["name"]
+        if "_aux_" not in aux:
+            continue
+        written = [full for key, full in flat.items() if full != aux and key in aux]
+        if written:
+            longest = max(written, key=len)
+            edges.add((aux, longest))
+            edges.add((longest, aux))
+    return edges
+
+
 # how many leading dotted components two names share, for picking between same-suffix candidates
 def shared_prefix(a, b):
     a, b = a.split("."), b.split(".")
@@ -145,7 +184,8 @@ def compile_and_extract(file, version):
 
     refs = env_dir / ".upload.ilean"
     flags = ["-D", "maxHeartbeats=0", "-D", "maxErrors=0",
-             "-D", "trace.Meta.Tactic.simp.rewrite=true"]
+             "-D", "trace.Meta.Tactic.simp.rewrite=true",
+             "-D", "trace.Meta.synthInstance.apply=true"]
     build = run(["lake", "env", "lean", "--json", *flags, "-i", str(refs), "-o", str(olean), "Upload.lean"], env_dir) # compile the proof, and write the reference table
     messages = parse_messages(build)
     if build.returncode != 0:
@@ -159,7 +199,8 @@ def compile_and_extract(file, version):
     graph = json.loads(out.read_text()) # parse json the extractor wrote
 
     known = {(e["from"], e["to"]) for e in graph["edges"]}
-    found = (simp_edges(messages, graph["nodes"]) | ilean_edges(refs, graph["nodes"])) - known
+    found = (simp_edges(messages, graph["nodes"]) | ilean_edges(refs, graph["nodes"])
+             | kin_edges(graph["nodes"])) - known
     for user, lemma in sorted(found): # edges the term did not keep
         graph["edges"].append({"from": user, "to": lemma})
     return graph

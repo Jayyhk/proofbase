@@ -15,7 +15,7 @@ function ExpandIcon() {
   )
 }
 
-// "Erdos958.counterexample" -> "counterexample"
+// a fully qualified name shows as its last component
 function shortName(name: string): string {
   return name.split('.').pop() ?? name
 }

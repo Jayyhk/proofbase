@@ -105,7 +105,7 @@ def conclusion : Expr -> Expr
   | .letE _ _ _ b _ => conclusion b
   | e => e
 
--- does this type end in a class?  `abbrev ShinyAlias a := Shiny a` hides one behind a
+-- does this type end in a class?  an abbreviation can hide one behind a
 -- definition, so reducible definitions are unfolded on the way
 partial def endsInClass (env : Environment) (fuel : Nat) (type : Expr) : Bool :=
   match fuel with

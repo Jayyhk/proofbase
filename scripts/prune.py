@@ -21,10 +21,6 @@ with engine.connect() as conn:
             {"p": proof_id}
         )
     }
-    instances = {
-        r.id for r in conn.execute(
-            text("SELECT id FROM declaration WHERE proof_id = :p AND is_instance"), {"p": proof_id})
-    }
     edges = [
         (r.from_id, r.to_id)
         for r in conn.execute(text("SELECT from_id, to_id FROM edge WHERE proof_id = :p"), {"p": proof_id})
@@ -54,13 +50,9 @@ uses = collections.defaultdict(set)
 for frm, to in edges:
     uses[frm].add(to)
 
-# a command can produce more than one declaration on the same lines: `notation` adds a macro
-# rule, `deriving` an instance, `@[to_additive]` an additive twin.  only the widest span is a
-# thing the file writes -- the rest live or die with it, so point the container at them and let
-# reachability carry what they use
 spans = [(st, en or st, i) for i, (nm, gen, st, en) in decls.items() if st]
 owner_of = {}
-for st, en, i in spans: # declarations sharing a span: the one the file wrote owns the others
+for st, en, i in spans:
     twins = [j for a, b, j in spans if (a, b) == (st, en)]
     owner_of[(st, en)] = min(twins, key=lambda j: (decls[j][1], j))
 inside = {}
@@ -75,19 +67,13 @@ for st, en, i in spans:
         inside[i] = owner_of[min(wider, key=lambda h: h[1] - h[0])[:2]]
 for i, holder in inside.items():
     uses[holder].add(i)
-# the theorem is the one root that matters, but an instance has to be kept even when nothing
-# points at it: the elaborator applies a coercion or a `deriving` handler and then erases the
-# instance from the term, so the file needs it again on the way back in while the graph, which
-# reads the finished term, cannot see that
-# a `notation`, `elab_rules` or `deriving` command puts its work in a declaration lean generates.
-# the pruner never deletes a generated declaration, and one whose lines are its own -- not inside
-# some other declaration's span -- therefore always survives, so whatever it uses has to stay
+
 written = [(st, en or st) for nm, gen, st, en in decls.values() if st and not gen]
 standalone = [
     i for i, (nm, gen, st, en) in decls.items()
     if gen and st and not any(a <= st and (en or st) <= b for a, b in written)
 ]
-reachable, stack = set(), [by_name[root], *instances, *standalone]
+reachable, stack = set(), [by_name[root], *standalone]
 while stack:
     n = stack.pop()
     if n in reachable:
@@ -116,14 +102,13 @@ def modifier_head(k):
         j -= 1
     return j if MODIFIER_HEAD.match(lines[j - 1]) else None
 
-
 KEYWORD = r"(?:theorem|lemma|def|abbrev|instance|structure|inductive|axiom|opaque|example)"
-# a notation command declares `termX` and a macro rule, neither of which it writes down
+
 NOTATION = re.compile(r"^\s*(?:@\[[^\]]*\]\s*)?"
                       r"(?:(?:scoped(?:\s*\[[^\]]*\])?|local|protected|private)\s+)*"
                       r"(?:notation|macro|macro_rules|syntax|infixl|infixr|infix|prefix|postfix|elab)\b")
 LITERAL = re.compile(r'"([^"]+)"')
-# `instance : Coe A B where ...` is named by lean, not by the file, so the name is not on the page
+
 ANONYMOUS = re.compile(r"^\s*(?:@\[[^\]]*\]\s*)?"
                        r"(?:(?:scoped|local|private|protected|noncomputable)\s+)*"
                        r"(?:instance|example)\b")
@@ -164,7 +149,6 @@ def blank_code(src, depths=None):
         out.append("".join(buf))
     return out
 
-
 DEPTH = []
 BLANK = blank_code(lines, DEPTH)
 
@@ -172,22 +156,17 @@ BLANK = blank_code(lines, DEPTH)
 def code_window(start):
     return BLANK[start - 1:start + 15]
 
-
 def comment_only(k):
     return not BLANK[k - 1].strip() and bool(lines[k - 1].strip())
 
-
 def code_head(start, end):
-    # line_start can point at the doc comment above the command, so find the first real line
     for k in range(start, (end or start) + 1):
         if BLANK[k - 1].strip():
             return k
     return start
 
-
 def command_line(start, end):
     return BLANK[code_head(start, end) - 1]
-
 
 def declares(start, end, name):
     short = re.escape(name.split(".")[-1])
@@ -196,15 +175,14 @@ def declares(start, end, name):
         return True
     head = command_line(start, end)
     if DERIVING.match(head):
-        return True # `deriving instance Fintype for M` declares instFintypeM, unwritten
+        return True
     written = ANONYMOUS.match(head)
     return bool(written) and not re.match(r"\s*[A-Za-z_]", head[written.end():])
-
 
 dead, untrusted = {}, 0
 for i, (name, generated, start, end) in decls.items():
     if i in reachable or generated or not start or i in inside:
-        continue # a declaration inside another's span goes with it, it is not deletable alone
+        continue
     if not declares(start, end, name) and not NOTATION.match(command_line(start, end)):
         untrusted += 1
         continue
@@ -254,8 +232,6 @@ for m, e in blocks:
 if blocks:
     print(f"mutual blocks {len(blocks)}  dropped whole {merged}, kept intact {len(blocks) - merged}")
 
-
-
 tokens = {
     name: set(LITERAL.findall(command_line(decls[i][2], decls[i][3])))
     for i, name in ((i, decls[i][0]) for i in decls)
@@ -280,7 +256,7 @@ while True:
     rescued |= clash
     clashed |= clash
     spoken |= {n for n in clash if n in tokens}
-    # whatever stays has to keep what it uses, even though the root cannot reach it
+
     stack = [by_name[part] for n in clash for part in n.split("\x00") if part in by_name]
     need = set()
     while stack:
@@ -303,12 +279,9 @@ if explain:
 if clashed:
     print(f"  {len(clashed)} kept because their lines overlap a declaration that stays")
 
-ambient = sum(1 for i in instances if not any(t == i for _, t in edges))
 print(f"declarations {len(decls)}  reachable {len(reachable)}  dead {len(dead)}"
-      + (f"  ({ambient} instances kept that nothing points at)" if ambient else "")
       + (f"  (skipped {untrusted} whose line range does not match their header)" if untrusted else ""))
-# `variable {f : CS n E}` and `attribute [simp] foo` are commands, not declarations, so nothing
-# points at them.  when every declaration of that name is gone, the line has to go too
+
 BINDER = re.compile(r"^\s*(?:variable|attribute)\b")
 WORD = re.compile(r"[^\W\d][\w.'!?\u2080-\u2089]*")
 deleted_names = {part.split(".")[-1] for n in dead if n not in rescued for part in n.split("\x00")}
@@ -318,22 +291,17 @@ GROUP = re.compile(r"[\[{(\u2983]([^\]})\u2984]*)[\]})\u2984]")
 
 
 def mentions(line):
-    # `variable {M : Type*} [AddCommMonoid M]` introduces M, it does not refer to a declaration
-    # named M.  only what follows a colon inside a binder group is a reference
     bound = set()
     for group in GROUP.findall(line):
         head = group.split(":")[0] if ":" in group else ""
         bound.update(WORD.findall(head))
     return {t.split(".")[-1] for t in WORD.findall(line)} - bound
 
-
 def command_at(k):
-    # a variable command can run over several lines, each continuation indented
     j = k
     while j < len(BLANK) and BLANK[j][:1].isspace() and BLANK[j].strip():
         j += 1
     return range(k, j + 1)
-
 
 orphaned = set()
 for i, line in enumerate(BLANK, 1):
@@ -432,7 +400,6 @@ def modifier_at(src, k):
         j -= 1
     return MODIFIER_HEAD.match(src[j - 1]) is not None
 
-
 def structural_problems(raw):
     src = blank_code(raw)
     problems, stack = [], []
@@ -464,7 +431,6 @@ def structural_problems(raw):
     for kind, name, opened in stack:
         problems.append(f"line {opened}: {kind} {name or ''}".rstrip() + " is never closed")
     return problems
-
 
 problems = structural_problems(out)
 if problems:
