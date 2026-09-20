@@ -102,29 +102,33 @@ def modifier_head(k):
         j -= 1
     return j if MODIFIER_HEAD.match(lines[j - 1]) else None
 
-KEYWORD = r"(?:theorem|lemma|def|abbrev|instance|structure|inductive|axiom|opaque|example)"
+KEYWORD = (r"(?:theorem|lemma|def|abbrev|instance|structure|class|inductive|axiom|opaque"
+           r"|example|alias|initialize|builtin_initialize)")
 
 NOTATION = re.compile(r"^\s*(?:@\[[^\]]*\]\s*)?"
                       r"(?:(?:scoped(?:\s*\[[^\]]*\])?|local|protected|private)\s+)*"
-                      r"(?:notation|macro|macro_rules|syntax|infixl|infixr|infix|prefix|postfix|elab)\b")
+                      r"(?:notation3|notation|macro_rules|macro|syntax|infixl|infixr|infix|prefix|postfix"
+                      r"|elab_rules|elab|declare_syntax_cat|binder_predicate)\b")
 LITERAL = re.compile(r'"([^"]+)"')
+CHAR_LITERAL = re.compile(r"'(?:\\(?:x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|.)|[^'\\])'")
+RAW_STRING = re.compile(r'r(#*)"')
+IDENT_CHAR = re.compile(r"[A-Za-z0-9_]")
 
 ANONYMOUS = re.compile(r"^\s*(?:@\[[^\]]*\]\s*)?"
                        r"(?:(?:scoped|local|private|protected|noncomputable)\s+)*"
                        r"(?:instance|example)\b")
 DERIVING = re.compile(r"^\s*deriving\s+instance\b")
 NOT_NAME_CHAR = r"(?![A-Za-z0-9_'!?])"
-FIRST_KEYWORD = re.compile(rf"(?:^|\s)({KEYWORD})\s")
-ATTRIBUTE = re.compile(r"^\s*@\[")
 
 
 def blank_code(src, depths=None):
-    out, depth = [], 0
+    out, depth, stack = [], 0, []
     for line in src:
         if depths is not None:
             depths.append(depth)
         buf, i, n = [], 0, len(line)
         while i < n:
+            here = stack[-1] if stack else None
             if depth:
                 if line.startswith("/-", i):
                     depth += 1; buf.append("  "); i += 2
@@ -132,18 +136,43 @@ def blank_code(src, depths=None):
                     depth -= 1; buf.append("  "); i += 2
                 else:
                     buf.append(" "); i += 1
+            elif here and here[0] == "string":
+                _, hashes, interp = here
+                closing = '"' + "#" * hashes if hashes >= 0 else '"'
+                if hashes < 0 and line[i] == "\\" and i + 1 < n:
+                    buf.append("  "); i += 2
+                elif interp and line[i] == "{":
+                    stack.append(["code", 0]); buf.append("{"); i += 1
+                elif line.startswith(closing, i):
+                    stack.pop(); buf.append(closing); i += len(closing)
+                else:
+                    buf.append(" "); i += 1
+            elif here and here[0] == "code" and line[i] in "{}":
+                if line[i] == "{":
+                    here[1] += 1
+                elif here[1]:
+                    here[1] -= 1
+                else:
+                    stack.pop()
+                buf.append(line[i]); i += 1
             elif line.startswith("/-", i):
                 depth = 1; buf.append("  "); i += 2
             elif line.startswith("--", i):
                 buf.append(" " * (n - i)); i = n
-            elif line.startswith("'\"'", i):
-                buf.append("   "); i += 3
+            elif line[i] == "\u00ab":
+                close = line.find("\u00bb", i)
+                close = n if close < 0 else close + 1
+                buf.append(line[i:close]); i = close
+            elif line[i] == "'" and CHAR_LITERAL.match(line, i):
+                width = CHAR_LITERAL.match(line, i).end() - i
+                buf.append(" " * width); i += width
             elif line[i] == '"':
-                j = i + 1
-                while j < n and line[j] != '"':
-                    j += 2 if line[j] == "\\" else 1
-                j = min(j + 1, n)
-                buf.append('"' + " " * max(0, j - i - 2) + ('"' if j - i >= 2 else "")); i = j
+                interp = line[i - 1:i] == "!" and IDENT_CHAR.match(line[i - 2:i - 1] or " ") is not None
+                stack.append(["string", -1, interp]); buf.append('"'); i += 1
+            elif line[i] == "r" and not IDENT_CHAR.match(line[i - 1:i] or " ") and RAW_STRING.match(line, i):
+                opener = RAW_STRING.match(line, i)
+                stack.append(["string", len(opener.group(1)), False])
+                buf.append(" " * (opener.end() - i - 1) + '"'); i = opener.end()
             else:
                 buf.append(line[i]); i += 1
         out.append("".join(buf))
@@ -171,7 +200,7 @@ def command_line(start, end):
 def declares(start, end, name):
     short = re.escape(name.split(".")[-1])
     head = "\n".join(code_window(code_head(start, end)))
-    if re.search(rf"(?:^|\s){KEYWORD}\s+(_root_\.)?(\S+\.)?{short}{NOT_NAME_CHAR}", head, re.M):
+    if re.search(rf"(?:^|\s){KEYWORD}\s+(_root_\.)?(\S+\.)?\u00ab?{short}\u00bb?{NOT_NAME_CHAR}", head, re.M):
         return True
     head = command_line(start, end)
     if DERIVING.match(head):
@@ -222,12 +251,12 @@ while b < len(lines):
 
 merged = 0
 for m, e in blocks:
-    inside = [n for n, s in dead.items() if m < min(s) and max(s) < e]
+    members_dead = [n for n, s in dead.items() if m < min(s) and max(s) < e]
     members = [d for d in decls.values() if d[2] and m < d[2] < e]
-    for n in inside:
+    for n in members_dead:
         del dead[n]
-    if members and len(inside) == len(members):
-        dead["\x00".join(inside)] = set(range(m, e + 1))
+    if members and len(members_dead) == len(members):
+        dead["\x00".join(members_dead)] = set(range(m, e + 1))
         merged += 1
 if blocks:
     print(f"mutual blocks {len(blocks)}  dropped whole {merged}, kept intact {len(blocks) - merged}")
@@ -242,9 +271,16 @@ rescued, drop, clashed, spoken = set(), set(), set(), set()
 while True:
     going = {part for n in dead if n not in rescued for part in n.split("\x00")}
     kept_lines = set()
-    for name, generated, start, end in decls.values():
-        if start and not generated and name not in going:
-            kept_lines.update(range(start, (end or start) + 1))
+    for i, (name, generated, start, end) in decls.items():
+        if not start or generated:
+            continue
+        holder = i
+        while holder in inside:
+            holder = inside[holder]
+        leaving = name in going or (i not in reachable and decls[holder][0] in going)
+        if leaving:
+            continue
+        kept_lines.update(range(start, (end or start) + 1))
     clash = {n for n, s in dead.items() if n not in rescued and (s & kept_lines)}
     if tokens:
         live = "\n".join(l for i, l in enumerate(BLANK, 1)
@@ -282,7 +318,8 @@ if clashed:
 print(f"declarations {len(decls)}  reachable {len(reachable)}  dead {len(dead)}"
       + (f"  (skipped {untrusted} whose line range does not match their header)" if untrusted else ""))
 
-BINDER = re.compile(r"^\s*(?:variable|attribute)\b")
+BINDER = re.compile(r"^\s*(?:variable|attribute|export|add_decl_doc"
+                    r"|#print|#check_failure|#check|#eval!|#eval|#reduce|#guard|#synth)\b")
 WORD = re.compile(r"[^\W\d][\w.'!?\u2080-\u2089]*")
 deleted_names = {part.split(".")[-1] for n in dead if n not in rescued for part in n.split("\x00")}
 surviving_names = {nm.split(".")[-1] for nm, _, st, _ in decls.values() if st and st not in drop}
@@ -303,15 +340,19 @@ def command_at(k):
         j += 1
     return range(k, j + 1)
 
+EXAMPLE = re.compile(r"^\s*(?:@\[[^\]]*\]\s*)?(?:(?:private|protected|noncomputable)\s+)*example\b")
+
 orphaned = set()
 for i, line in enumerate(BLANK, 1):
+    if i not in drop and EXAMPLE.match(line):
+        orphaned.update(command_at(i))
     if i in drop or not BINDER.match(line):
         continue
     span = command_at(i)
     if any(mentions(BLANK[k - 1]) & vanished for k in span):
         orphaned.update(span)
 if orphaned:
-    print(f"  dropping {len(orphaned)} variable or attribute lines naming something deleted")
+    print(f"  dropping {len(orphaned)} lines of examples and commands that name something deleted")
     drop |= orphaned
 
 lines = [l for i, l in enumerate(lines, 1) if i not in drop]
