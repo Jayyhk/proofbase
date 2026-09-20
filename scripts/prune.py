@@ -1,5 +1,7 @@
 import collections
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -9,11 +11,14 @@ from api.db import engine
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 explain = "--explain" in sys.argv
+verify = "--verify" in sys.argv
 proof_id = int(args[0])
 path = Path(args[1])
 root = args[2] if len(args) > 2 else None
+forced = set(os.environ.get("PRUNE_FORCED", "").split())
 
 with engine.connect() as conn:
+    version = conn.execute(text("SELECT lean_version FROM proof WHERE id = :p"), {"p": proof_id}).scalar()
     decls = {
         r.id: (r.name, r.is_generated, r.line_start, r.line_end)
         for r in conn.execute(
@@ -103,13 +108,25 @@ def modifier_head(k):
     return j if MODIFIER_HEAD.match(lines[j - 1]) else None
 
 KEYWORD = (r"(?:theorem|lemma|def|abbrev|instance|structure|class|inductive|axiom|opaque"
-           r"|example|alias|initialize|builtin_initialize)")
+           r"|example|alias|initialize|builtin_initialize|irreducible_def|unif_hint|lrat_proof"
+           r"|simproc_decl|simproc|dsimproc_decl|dsimproc|coinductive|mk_iff_of_inductive_prop"
+           r"|proof_wanted|def_wanted|theorem_wanted|instance_wanted"
+           r"|register_builtin_option|register_option)")
 
 NOTATION = re.compile(r"^\s*(?:@\[[^\]]*\]\s*)?"
                       r"(?:(?:scoped(?:\s*\[[^\]]*\])?|local|protected|private)\s+)*"
                       r"(?:notation3|notation|macro_rules|macro|syntax|infixl|infixr|infix|prefix|postfix"
                       r"|elab_rules|elab|declare_syntax_cat|binder_predicate)\b")
 LITERAL = re.compile(r'"([^"]+)"')
+BINDER = re.compile(r"^\s*(?:#[A-Za-z_][\w?!]*"
+                    r"|variable|attribute|export|add_decl_doc|seal|unseal|recall"
+                    r"|assert_not_exists|assert_no_sorry|extend_docs|library_note|deprecate"
+                    r"|initialize_simps_projections\??|add_aesop_rules|erase_aesop_rules"
+                    r"|grind_pattern|grind_annotated|norm_cast_add_elim|deprecated_syntax"
+                    r"|to_dual_insert_cast_fun|to_dual_insert_cast|to_dual_name_hint"
+                    r"|to_additive_name_hint|insert_to_additive_translation|recommended_spelling)\b")
+WORD_TOKEN = re.compile(r"[^\W\d][\w.'!?\u2080-\u2089]*")
+CATEGORY = re.compile(r"^\s*declare_syntax_cat\s+(\S+)")
 CHAR_LITERAL = re.compile(r"'(?:\\(?:x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|.)|[^'\\])'")
 RAW_STRING = re.compile(r'r(#*)"')
 IDENT_CHAR = re.compile(r"[A-Za-z0-9_]")
@@ -210,6 +227,8 @@ def declares(start, end, name):
 
 dead, untrusted = {}, 0
 for i, (name, generated, start, end) in decls.items():
+    if name in forced:
+        continue
     if i in reachable or generated or not start or i in inside:
         continue
     if not declares(start, end, name) and not NOTATION.match(command_line(start, end)):
@@ -261,8 +280,14 @@ for m, e in blocks:
 if blocks:
     print(f"mutual blocks {len(blocks)}  dropped whole {merged}, kept intact {len(blocks) - merged}")
 
+def spelled(start, end):
+    written = lines[code_head(start, end) - 1]
+    named = CATEGORY.match(written)
+    return set(LITERAL.findall(written)) | ({named.group(1)} if named else set())
+
+
 tokens = {
-    name: set(LITERAL.findall(command_line(decls[i][2], decls[i][3])))
+    name: spelled(decls[i][2], decls[i][3])
     for i, name in ((i, decls[i][0]) for i in decls)
     if name in dead and NOTATION.match(command_line(decls[i][2], decls[i][3]))
 }
@@ -283,10 +308,15 @@ while True:
         kept_lines.update(range(start, (end or start) + 1))
     clash = {n for n, s in dead.items() if n not in rescued and (s & kept_lines)}
     if tokens:
-        live = "\n".join(l for i, l in enumerate(BLANK, 1)
-                          if i not in set().union(set(), *(sp for n, sp in dead.items() if n not in rescued)))
+        leaving = set().union(set(), *(sp for n, sp in dead.items() if n not in rescued))
+        live = "\n".join(l for i, l in enumerate(lines, 1) if i not in leaving)
         clash |= {n for n, lits in tokens.items()
                   if n not in rescued and any(lit in live for lit in lits)}
+    leaving_now = set().union(set(), *(sp for n, sp in dead.items() if n not in rescued))
+    surviving = set(WORD_TOKEN.findall(
+        "\n".join(l for i, l in enumerate(BLANK, 1) if i not in leaving_now)))
+    clash |= {n for n in dead if n not in rescued
+              and any(part in surviving for part in n.split("\x00"))}
     if not clash:
         break
     rescued |= clash
@@ -318,8 +348,6 @@ if clashed:
 print(f"declarations {len(decls)}  reachable {len(reachable)}  dead {len(dead)}"
       + (f"  (skipped {untrusted} whose line range does not match their header)" if untrusted else ""))
 
-BINDER = re.compile(r"^\s*(?:variable|attribute|export|add_decl_doc"
-                    r"|#print|#check_failure|#check|#eval!|#eval|#reduce|#guard|#synth)\b")
 WORD = re.compile(r"[^\W\d][\w.'!?\u2080-\u2089]*")
 deleted_names = {part.split(".")[-1] for n in dead if n not in rescued for part in n.split("\x00")}
 surviving_names = {nm.split(".")[-1] for nm, _, st, _ in decls.values() if st and st not in drop}
@@ -492,3 +520,32 @@ ending = "\r\n" if "\r\n" in stored else "\n"
 path.write_text(ending.join(out) + ending, newline="")
 removed = len(original) - len(out)
 print(f"{len(original):,} -> {len(out):,} lines ({100 * removed / len(original):.1f}% removed)")
+
+WANTED = re.compile(r"[Uu]nknown (?:identifier|constant) `([^`]+)`")
+
+if verify:
+    from api.compiler import COMPILE_ENV, run
+    env_dir = COMPILE_ENV / (version or "").split("v")[-1]
+    target = env_dir / f".verify-{proof_id}.lean"
+    target.write_text(path.read_text())
+    try:
+        built = run(["lake", "env", "lean", target.name], env_dir)
+    finally:
+        target.unlink(missing_ok=True)
+    trouble = [l for l in (built.stdout + built.stderr).splitlines() if ": error" in l]
+    if not trouble:
+        print("  verified: the pruned file compiles")
+    else:
+        asked = {m for line in trouble for m in WANTED.findall(line)}
+        fresh = {n for n in asked if n not in forced} | {
+            d for n in asked for d in [next((x for x in by_name if x.endswith("." + n) or x == n), None)] if d
+        }
+        path.write_text(stored, newline="")
+        if fresh - forced:
+            print(f"  lean wanted {len(fresh - forced)} back, pruning again")
+            os.execve(sys.executable, [sys.executable, *sys.argv],
+                      {**os.environ, "PRUNE_FORCED": " ".join(forced | fresh)})
+        print(f"  refusing to prune: the result did not compile and lean did not name what is missing")
+        for line in trouble[:3]:
+            print(f"    {line[:110]}")
+        sys.exit(1)
