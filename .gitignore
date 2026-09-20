@@ -5,6 +5,7 @@
 # compile-env runtime artifacts
 compile-env/*/Upload.lean
 compile-env/*/.upload.json
+compile-env/*/.upload.ilean
 
 # python
 __pycache__/

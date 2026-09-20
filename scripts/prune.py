@@ -21,12 +21,9 @@ with engine.connect() as conn:
             {"p": proof_id}
         )
     }
-    magic = {
-        r.id: (r.is_instance, r.is_simp)
-        for r in conn.execute(
-            text("SELECT id, is_instance, is_simp FROM declaration WHERE proof_id = :p"),
-            {"p": proof_id}
-        )
+    instances = {
+        r.id for r in conn.execute(
+            text("SELECT id FROM declaration WHERE proof_id = :p AND is_instance"), {"p": proof_id})
     }
     edges = [
         (r.from_id, r.to_id)
@@ -56,7 +53,41 @@ if root not in by_name:
 uses = collections.defaultdict(set)
 for frm, to in edges:
     uses[frm].add(to)
-reachable, stack = set(), [by_name[root]]
+
+# a command can produce more than one declaration on the same lines: `notation` adds a macro
+# rule, `deriving` an instance, `@[to_additive]` an additive twin.  only the widest span is a
+# thing the file writes -- the rest live or die with it, so point the container at them and let
+# reachability carry what they use
+spans = [(st, en or st, i) for i, (nm, gen, st, en) in decls.items() if st]
+owner_of = {}
+for st, en, i in spans: # declarations sharing a span: the one the file wrote owns the others
+    twins = [j for a, b, j in spans if (a, b) == (st, en)]
+    owner_of[(st, en)] = min(twins, key=lambda j: (decls[j][1], j))
+inside = {}
+for st, en, i in spans:
+    same = owner_of[(st, en)]
+    if same != i:
+        inside[i] = same
+        continue
+    wider = [(a, b, j) for a, b, j in spans
+             if (a, b) != (st, en) and a <= st and en <= b]
+    if wider:
+        inside[i] = owner_of[min(wider, key=lambda h: h[1] - h[0])[:2]]
+for i, holder in inside.items():
+    uses[holder].add(i)
+# the theorem is the one root that matters, but an instance has to be kept even when nothing
+# points at it: the elaborator applies a coercion or a `deriving` handler and then erases the
+# instance from the term, so the file needs it again on the way back in while the graph, which
+# reads the finished term, cannot see that
+# a `notation`, `elab_rules` or `deriving` command puts its work in a declaration lean generates.
+# the pruner never deletes a generated declaration, and one whose lines are its own -- not inside
+# some other declaration's span -- therefore always survives, so whatever it uses has to stay
+written = [(st, en or st) for nm, gen, st, en in decls.values() if st and not gen]
+standalone = [
+    i for i, (nm, gen, st, en) in decls.items()
+    if gen and st and not any(a <= st and (en or st) <= b for a, b in written)
+]
+reachable, stack = set(), [by_name[root], *instances, *standalone]
 while stack:
     n = stack.pop()
     if n in reachable:
@@ -87,6 +118,16 @@ def modifier_head(k):
 
 
 KEYWORD = r"(?:theorem|lemma|def|abbrev|instance|structure|inductive|axiom|opaque|example)"
+# a notation command declares `termX` and a macro rule, neither of which it writes down
+NOTATION = re.compile(r"^\s*(?:@\[[^\]]*\]\s*)?"
+                      r"(?:(?:scoped(?:\s*\[[^\]]*\])?|local|protected|private)\s+)*"
+                      r"(?:notation|macro|macro_rules|syntax|infixl|infixr|infix|prefix|postfix|elab)\b")
+LITERAL = re.compile(r'"([^"]+)"')
+# `instance : Coe A B where ...` is named by lean, not by the file, so the name is not on the page
+ANONYMOUS = re.compile(r"^\s*(?:@\[[^\]]*\]\s*)?"
+                       r"(?:(?:scoped|local|private|protected|noncomputable)\s+)*"
+                       r"(?:instance|example)\b")
+DERIVING = re.compile(r"^\s*deriving\s+instance\b")
 NOT_NAME_CHAR = r"(?![A-Za-z0-9_'!?])"
 FIRST_KEYWORD = re.compile(rf"(?:^|\s)({KEYWORD})\s")
 ATTRIBUTE = re.compile(r"^\s*@\[")
@@ -136,59 +177,35 @@ def comment_only(k):
     return not BLANK[k - 1].strip() and bool(lines[k - 1].strip())
 
 
-def declares(start, name):
+def code_head(start, end):
+    # line_start can point at the doc comment above the command, so find the first real line
+    for k in range(start, (end or start) + 1):
+        if BLANK[k - 1].strip():
+            return k
+    return start
+
+
+def command_line(start, end):
+    return BLANK[code_head(start, end) - 1]
+
+
+def declares(start, end, name):
     short = re.escape(name.split(".")[-1])
-    head = "\n".join(code_window(start))
-    return re.search(rf"(?:^|\s){KEYWORD}\s+(_root_\.)?(\S+\.)?{short}{NOT_NAME_CHAR}", head, re.M) is not None
+    head = "\n".join(code_window(code_head(start, end)))
+    if re.search(rf"(?:^|\s){KEYWORD}\s+(_root_\.)?(\S+\.)?{short}{NOT_NAME_CHAR}", head, re.M):
+        return True
+    head = command_line(start, end)
+    if DERIVING.match(head):
+        return True # `deriving instance Fintype for M` declares instFintypeM, unwritten
+    written = ANONYMOUS.match(head)
+    return bool(written) and not re.match(r"\s*[A-Za-z_]", head[written.end():])
 
 
-def is_instance(start):
-    for line in code_window(start):
-        m = FIRST_KEYWORD.search(line)
-        if m:
-            return m.group(1) == "instance"
-    return False
-
-
-def tagged(start):
-    for line in code_window(start):
-        if ATTRIBUTE.match(line):
-            return True
-        if FIRST_KEYWORD.search(line):
-            break
-    k = start
-    while k >= 1:
-        if ATTRIBUTE.match(BLANK[k - 1]):
-            return True
-        if k == start:
-            k -= 1
-            continue
-        head = modifier_head(k)
-        if head is not None:
-            k = head - 1
-            continue
-        if comment_only(k) or not lines[k - 1].strip():
-            k -= 1
-            continue
-        return False
-    return False
-
-
-dead, untrusted, attributed, instances = {}, 0, 0, 0
-unused_magic = []
+dead, untrusted = {}, 0
 for i, (name, generated, start, end) in decls.items():
-    if i in reachable or generated or not start:
-        continue
-    is_inst, is_simp = magic.get(i, (False, False))
-    if is_inst or is_instance(start):
-        instances += 1
-        unused_magic.append((name, "instance"))
-        continue
-    if is_simp or tagged(start):
-        attributed += 1
-        unused_magic.append((name, "simp lemma" if is_simp else "attribute"))
-        continue
-    if not declares(start, name):
+    if i in reachable or generated or not start or i in inside:
+        continue # a declaration inside another's span goes with it, it is not deletable alone
+    if not declares(start, end, name) and not NOTATION.match(command_line(start, end)):
         untrusted += 1
         continue
     span = set(range(start, (end or start) + 1))
@@ -213,7 +230,6 @@ for i, (name, generated, start, end) in decls.items():
         k -= 1
     dead[name] = span
 
-TOKEN = re.compile(r"[^\W\d][\w.'!?₀-₉]*")
 BARE_END = re.compile(r"^end\s*$")
 blocks, b = [], 0
 while b < len(lines):
@@ -239,116 +255,97 @@ if blocks:
     print(f"mutual blocks {len(blocks)}  dropped whole {merged}, kept intact {len(blocks) - merged}")
 
 
-def namespace_by_line(src):
-    out, stack = [], []
-    for line in src:
-        out.append(".".join(stack))
-        opened = NAMESPACE_NAME.match(line)
-        closed = END_NAMED.match(line)
-        if opened:
-            stack.extend(opened.group(1).split("."))
-        elif closed:
-            for _ in closed.group(1).split("."):
-                if stack:
-                    stack.pop()
-    return out
 
+tokens = {
+    name: set(LITERAL.findall(command_line(decls[i][2], decls[i][3])))
+    for i, name in ((i, decls[i][0]) for i in decls)
+    if name in dead and NOTATION.match(command_line(decls[i][2], decls[i][3]))
+}
 
-END_NAMED = re.compile(r"^end\s+(\S+)\s*$")
-NS_AT = namespace_by_line(BLANK)
-
-by_short = collections.defaultdict(list)
-for _, (nm, _, st, _) in decls.items():
-    by_short[nm.split(".")[-1]].append(nm)
-
-own_header = {(st, nm.split(".")[-1]) for nm, _, st, _ in decls.values() if st}
-
-
-def shared_prefix(a, b):
-    a, b = a.split("."), b.split(".")
-    n = 0
-    while n < min(len(a), len(b)) and a[n] == b[n]:
-        n += 1
-    return n
-
-
-rescued, drop, rounds, saved_by, clashed = set(), set(), 0, {}, set()
+rescued, drop, clashed, spoken = set(), set(), set(), set()
 while True:
-    rounds += 1
-    drop = set().union(set(), *(s for n, s in dead.items() if n not in rescued))
-    named = {}
-    for i, line in enumerate(BLANK, 1):
-        if i in drop:
-            continue
-        for t in TOKEN.findall(line):
-            parts = t.split(".")
-            for e in range(len(parts), 0, -1):
-                short = parts[e - 1]
-                if (i, short) in own_header:
-                    continue
-                pool = by_short.get(short)
-                if not pool:
-                    continue
-                candidates = []
-                for j in range(e):
-                    sub = ".".join(parts[j:e])
-                    candidates = [c for c in pool if c == sub or c.endswith("." + sub)]
-                    if candidates:
-                        break
-                if not candidates:
-                    continue
-                best = max(shared_prefix(c, NS_AT[i - 1]) for c in candidates)
-                for c in candidates:
-                    if shared_prefix(c, NS_AT[i - 1]) == best:
-                        named.setdefault(c, i)
-    fresh = {}
-    for n in dead:
-        if n in rescued:
-            continue
-        for part in n.split("\x00"):
-            at = named.get(part)
-            if at is not None:
-                fresh[n] = (part, at)
-                break
-    going = {part for n in dead if n not in rescued and n not in fresh for part in n.split("\x00")}
+    going = {part for n in dead if n not in rescued for part in n.split("\x00")}
     kept_lines = set()
     for name, generated, start, end in decls.values():
         if start and not generated and name not in going:
             kept_lines.update(range(start, (end or start) + 1))
-    clash = {n for n, s in dead.items() if n not in rescued and n not in fresh and (s & kept_lines)}
-    if not fresh and not clash:
+    clash = {n for n, s in dead.items() if n not in rescued and (s & kept_lines)}
+    if tokens:
+        live = "\n".join(l for i, l in enumerate(BLANK, 1)
+                          if i not in set().union(set(), *(sp for n, sp in dead.items() if n not in rescued)))
+        clash |= {n for n, lits in tokens.items()
+                  if n not in rescued and any(lit in live for lit in lits)}
+    if not clash:
         break
-    rescued |= set(fresh) | clash
+    rescued |= clash
     clashed |= clash
-    saved_by.update(fresh)
+    spoken |= {n for n in clash if n in tokens}
+    # whatever stays has to keep what it uses, even though the root cannot reach it
+    stack = [by_name[part] for n in clash for part in n.split("\x00") if part in by_name]
+    need = set()
+    while stack:
+        d = stack.pop()
+        if d in need:
+            continue
+        need.add(d)
+        stack.extend(uses[d] - need)
+    wanted = {decls[d][0] for d in need}
+    also = {n for n in dead if n not in rescued and any(p in wanted for p in n.split("\x00"))}
+    rescued |= also
+    clashed |= also
 drop = set().union(set(), *(s for n, s in dead.items() if n not in rescued))
 
 if explain:
     for n in sorted(dead):
-        if n in saved_by:
-            part, at = saved_by[n]
-            print(f"  kept {part}: named on line {at}: {lines[at - 1].strip()[:90]}")
-        elif n in clashed:
-            print(f"  kept {n.replace(chr(0), ' + ')}: its lines overlap a declaration that stays")
-        else:
-            print(f"  dropping {n.replace(chr(0), ' + ')}")
+        print(f"  {'kept, its lines overlap one that stays' if n in clashed else 'dropping'}"
+              f" {n.replace(chr(0), ' + ')}")
 
 if clashed:
     print(f"  {len(clashed)} kept because their lines overlap a declaration that stays")
 
-if unused_magic:
-    kinds = collections.Counter(k for _, k in unused_magic)
-    print("  nothing uses " + ", ".join(f"{n} {k}{'s' if n > 1 else ''}" for k, n in kinds.items())
-          + " -- kept because simp and typeclass resolution find them without a name")
-
-if saved_by:
-    print(f"  {len(saved_by)} kept only because the text still names them")
-
-print(f"declarations {len(decls)}  reachable {len(reachable)}  dead {len(dead)}  "
-      f"rescued by name {len(saved_by)} in {rounds} rounds"
-      + (f"  kept {attributed} attribute-carrying" if attributed else "")
-      + (f", {instances} instances" if instances else "")
+ambient = sum(1 for i in instances if not any(t == i for _, t in edges))
+print(f"declarations {len(decls)}  reachable {len(reachable)}  dead {len(dead)}"
+      + (f"  ({ambient} instances kept that nothing points at)" if ambient else "")
       + (f"  (skipped {untrusted} whose line range does not match their header)" if untrusted else ""))
+# `variable {f : CS n E}` and `attribute [simp] foo` are commands, not declarations, so nothing
+# points at them.  when every declaration of that name is gone, the line has to go too
+BINDER = re.compile(r"^\s*(?:variable|attribute)\b")
+WORD = re.compile(r"[^\W\d][\w.'!?\u2080-\u2089]*")
+deleted_names = {part.split(".")[-1] for n in dead if n not in rescued for part in n.split("\x00")}
+surviving_names = {nm.split(".")[-1] for nm, _, st, _ in decls.values() if st and st not in drop}
+vanished = deleted_names - surviving_names
+GROUP = re.compile(r"[\[{(\u2983]([^\]})\u2984]*)[\]})\u2984]")
+
+
+def mentions(line):
+    # `variable {M : Type*} [AddCommMonoid M]` introduces M, it does not refer to a declaration
+    # named M.  only what follows a colon inside a binder group is a reference
+    bound = set()
+    for group in GROUP.findall(line):
+        head = group.split(":")[0] if ":" in group else ""
+        bound.update(WORD.findall(head))
+    return {t.split(".")[-1] for t in WORD.findall(line)} - bound
+
+
+def command_at(k):
+    # a variable command can run over several lines, each continuation indented
+    j = k
+    while j < len(BLANK) and BLANK[j][:1].isspace() and BLANK[j].strip():
+        j += 1
+    return range(k, j + 1)
+
+
+orphaned = set()
+for i, line in enumerate(BLANK, 1):
+    if i in drop or not BINDER.match(line):
+        continue
+    span = command_at(i)
+    if any(mentions(BLANK[k - 1]) & vanished for k in span):
+        orphaned.update(span)
+if orphaned:
+    print(f"  dropping {len(orphaned)} variable or attribute lines naming something deleted")
+    drop |= orphaned
+
 lines = [l for i, l in enumerate(lines, 1) if i not in drop]
 print(f"dropped {len(drop):,} lines")
 

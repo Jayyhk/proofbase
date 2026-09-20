@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent # repo root
 COMPILE_ENV = ROOT / "compile-env"
 EXTRACTOR = COMPILE_ENV / "extract.lean"
 ELAN_BIN = str(Path.home() / ".elan" / "bin")
+MODULE = "Upload" # the uploaded proof is compiled as this module
 
 
 # no extra behavior except subclassing Exception so we can raise CompileError
@@ -96,6 +97,34 @@ def simp_edges(messages, nodes):
     return edges
 
 
+# lean writes the language server's reference table when asked for an ilean: every identifier
+# it resolved, as a full name and the module it came from, with the declaration that wrote it.
+# these are the file's dependencies on the page, which the proof term does not always keep:
+# a lemma handed to simp that never fires, dot notation, a name used only in a statement
+PRIVATE = re.compile(rf"^_private\.{MODULE}\.\d+\.")
+
+
+def ilean_edges(path, nodes):
+    if not path.exists():
+        return set()
+    data = json.loads(path.read_text())
+    owned = {n["name"] for n in nodes}
+    plain = lambda n: PRIVATE.sub("", n or "") # a private declaration is mangled here, not in the environment
+    edges = set()
+    for key, entry in data.get("references", {}).items():
+        const = json.loads(key).get("c")
+        if not const or const.get("m") != MODULE:
+            continue
+        to = plain(const["n"])
+        if to not in owned:
+            continue
+        for usage in entry.get("usages", []):
+            user = plain(usage[4]) if len(usage) > 4 else None
+            if user in owned and user != to:
+                edges.add((user, to))
+    return edges
+
+
 # how many leading dotted components two names share, for picking between same-suffix candidates
 def shared_prefix(a, b):
     a, b = a.split("."), b.split(".")
@@ -114,9 +143,10 @@ def compile_and_extract(file, version):
     upload.write_text(file) # write the uploaded proof into Upload.lean
     olean.parent.mkdir(parents=True, exist_ok=True) # lake makes this, but not on a fresh box
 
+    refs = env_dir / ".upload.ilean"
     flags = ["-D", "maxHeartbeats=0", "-D", "maxErrors=0",
              "-D", "trace.Meta.Tactic.simp.rewrite=true"]
-    build = run(["lake", "env", "lean", "--json", *flags, "-o", str(olean), "Upload.lean"], env_dir) # compile the proof
+    build = run(["lake", "env", "lean", "--json", *flags, "-i", str(refs), "-o", str(olean), "Upload.lean"], env_dir) # compile the proof, and write the reference table
     messages = parse_messages(build)
     if build.returncode != 0:
         raise CompileError(error_text(messages) or clean_output(build) or f"lean exited with code {build.returncode} and no output")
@@ -129,6 +159,7 @@ def compile_and_extract(file, version):
     graph = json.loads(out.read_text()) # parse json the extractor wrote
 
     known = {(e["from"], e["to"]) for e in graph["edges"]}
-    for user, lemma in sorted(simp_edges(messages, graph["nodes"]) - known): # edges the term missed
+    found = (simp_edges(messages, graph["nodes"]) | ilean_edges(refs, graph["nodes"])) - known
+    for user, lemma in sorted(found): # edges the term did not keep
         graph["edges"].append({"from": user, "to": lemma})
     return graph
