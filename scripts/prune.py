@@ -387,6 +387,7 @@ lines = [l for i, l in enumerate(lines, 1) if i not in drop]
 print(f"dropped {len(drop):,} lines")
 
 OPEN = re.compile(r"^\s*(?:open|export)\b\s*(?:scoped\s+)?(.*)$")
+FILLER = re.compile(r"^\s*(?:open|export|variable|universe)\b")
 NAME = re.compile(r"[A-Za-z_][\w.']*")
 CONT = re.compile(r"^\s+[A-Za-z_][\w.']*\s*$")
 emptied = 0
@@ -431,13 +432,14 @@ for _ in range(10):
                     empties.append((ns, full, opened, i))
             if stack and occupied:
                 stack[-1][2] = True
-        elif stack and lines[i - 1].strip():
+        elif stack and lines[i - 1].strip() and not FILLER.match(line):
             stack[-1][2] = True
     for ns, full, opened, closed in empties:
-        if occupied_at.get(full, opened) < opened:
-            kill |= {opened, closed}
+        hollow = set(range(opened, closed + 1))
+        if full in occupied_at:
+            kill |= hollow
         elif ns not in opened_names and ns.split(".")[-1] not in opened_names:
-            kill |= {opened, closed}
+            kill |= hollow
     if stack:
         print(f"  warning: {len(stack)} scopes left open")
     if not kill:
