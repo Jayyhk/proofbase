@@ -85,16 +85,19 @@ def simp_edges(messages, nodes):
         parts = name.split(".")
         for i in range(len(parts)):
             by_suffix.setdefault(".".join(parts[i:]), []).append(name)
-    # smallest range first, so the innermost declaration wins
-    ranges = sorted(
+    # which declaration owns each line, widest first so the innermost one wins the slot. ownership
+    # is settled once here rather than searched through the ranges again for every message
+    owner_of_line = {}
+    for start, end, name in sorted(
         ((n["lineStart"], n["lineEnd"] or n["lineStart"], n["name"]) for n in nodes if n["lineStart"]),
-        key=lambda r: r[1] - r[0]
-    )
+        key=lambda r: r[1] - r[0], reverse=True
+    ):
+        for line in range(start, end + 1):
+            owner_of_line[line] = name
 
     edges = set()
     for message in messages:
-        at = message.get("pos", {}).get("line")
-        user = next((name for lo, hi, name in ranges if lo <= at <= hi), None)
+        user = owner_of_line.get(message.get("pos", {}).get("line"))
         if user is None:
             continue
         for lemma in traced_names(message.get("data", "")): # one message can hold several
@@ -183,9 +186,10 @@ def compile_and_extract(file, version):
     olean.parent.mkdir(parents=True, exist_ok=True) # lake makes this, but not on a fresh box
 
     refs = env_dir / ".upload.ilean"
+    # weak. so an option an older toolchain does not know is skipped instead of failing the build
     flags = ["-D", "maxHeartbeats=0", "-D", "maxErrors=0",
-             "-D", "trace.Meta.Tactic.simp.rewrite=true",
-             "-D", "trace.Meta.synthInstance.apply=true"]
+             "-D", "weak.trace.Meta.Tactic.simp.rewrite=true",
+             "-D", "weak.trace.Meta.synthInstance.apply=true"]
     build = run(["lake", "env", "lean", "--json", *flags, "-i", str(refs), "-o", str(olean), "Upload.lean"], env_dir) # compile the proof, and write the reference table
     messages = parse_messages(build)
     if build.returncode != 0:

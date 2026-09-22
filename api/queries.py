@@ -5,6 +5,7 @@ from sqlalchemy import text
 def store_proof_stats(conn, proof_id):
     conn.execute(
         text("""
+            WITH drawn AS MATERIALIZED (SELECT * FROM graph_edges(:id))
             UPDATE proof SET
                 -- count of this proof's real declarations
                 declarations = (
@@ -19,11 +20,11 @@ def store_proof_stats(conn, proof_id):
                     WHERE d.proof_id = :id
                     AND NOT d.is_instance AND NOT d.is_simp
                     AND NOT EXISTS (
-                        SELECT 1 FROM graph_edges(:id) ge WHERE ge.to_id = d.id
+                        SELECT 1 FROM drawn ge WHERE ge.to_id = d.id
                     )
                 ),
                 -- edges between 2 real declarations (exclude axioms)
-                edges = (SELECT count(*) FROM graph_edges(:id)),
+                edges = (SELECT count(*) FROM drawn),
                 -- count axiom uses by risk kind
                 flagged = (SELECT count(*) FROM axiom_use WHERE proof_id = :id AND kind <> 'standard'),
                 sorry = (SELECT count(*) FROM axiom_use WHERE proof_id = :id AND kind = 'sorry'),

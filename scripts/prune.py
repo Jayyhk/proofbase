@@ -412,33 +412,41 @@ for _ in range(10):
         if NAMESPACE.match(line):
             if stack:
                 stack[-1][2] = True
-            parent = next((e[3] for e in reversed(stack) if e[0] == "namespace"), "")
-            written = NAMESPACE_NAME.match(line).group(1)
-            stack.append(["namespace", i, False, f"{parent}.{written}" if parent else written])
+            parent = next((e[4] for e in reversed(stack) if e[0] == "namespace"), "")
+            written, fulls = NAMESPACE_NAME.match(line).group(1), []
+            for part in written.split("."):
+                parent = f"{parent}.{part}" if parent else part
+                fulls.append(parent)
+            for nth, full in enumerate(fulls):
+                stack.append(["namespace", i, False, nth == 0, full, written, fulls[-1]])
         elif SECTION.match(line):
-            stack.append(["section", i, False, None])
+            stack.append(["section", i, False, False, None, None, None])
         elif MUTUAL.match(line):
-            stack.append(["mutual", i, False, None])
+            stack.append(["mutual", i, False, False, None, None, None])
         elif END.match(line):
-            if not stack:
-                print(f"  warning: unmatched end at line {i}")
-                continue
-            kind, opened, occupied, full = stack.pop()
-            if kind == "namespace":
-                ns = NAMESPACE_NAME.match(scan[opened - 1]).group(1)
+            closing = line.split()[1].split(".") if len(line.split()) > 1 else [None]
+            for _ in closing:
+                if not stack:
+                    print(f"  warning: unmatched end at line {i}")
+                    break
+                kind, opened, occupied, outermost, full, ns, innermost = stack.pop()
+                if kind != "namespace":
+                    if stack and occupied:
+                        stack[-1][2] = True
+                    break
                 if occupied:
                     occupied_at.setdefault(full, opened)
-                else:
-                    empties.append((ns, full, opened, i))
-            if stack and occupied:
-                stack[-1][2] = True
+                elif outermost:
+                    empties.append((ns, innermost, opened, i))
+                if stack and occupied:
+                    stack[-1][2] = True
         elif stack and lines[i - 1].strip() and not FILLER.match(line):
             stack[-1][2] = True
     for ns, full, opened, closed in empties:
         hollow = set(range(opened, closed + 1))
         if full in occupied_at:
             kill |= hollow
-        elif ns not in opened_names and ns.split(".")[-1] not in opened_names:
+        elif not any(part in opened_names for part in [ns, *ns.split(".")]):
             kill |= hollow
     if stack:
         print(f"  warning: {len(stack)} scopes left open")
@@ -476,7 +484,8 @@ def structural_problems(raw):
     problems, stack = [], []
     for i, line in enumerate(src, 1):
         if NAMESPACE.match(line):
-            stack.append(("namespace", NAMESPACE_NAME.match(line).group(1), i))
+            for part in NAMESPACE_NAME.match(line).group(1).split("."):
+                stack.append(("namespace", part, i))
         elif SECTION.match(line):
             named = SECTION_NAME.match(line)
             stack.append(("section", named.group(1) if named else None, i))
@@ -484,15 +493,18 @@ def structural_problems(raw):
             stack.append(("mutual", None, i))
         elif END.match(line):
             named = line.split()[1] if len(line.split()) > 1 else None
-            if not stack:
-                problems.append(f"line {i}: `end` with no open scope")
-                continue
-            kind, name, opened = stack.pop()
-            if kind == "namespace" and named != name:
-                problems.append(f"line {i}: `end {named or ''}`".rstrip()
-                                + f" closes `namespace {name}` from line {opened}")
-            elif kind != "namespace" and named is not None and named != name:
-                problems.append(f"line {i}: `end {named}` closes the {kind} opened at line {opened}")
+            for part in reversed(named.split(".") if named else [None]):
+                if not stack:
+                    problems.append(f"line {i}: `end` with no open scope")
+                    break
+                kind, name, opened = stack.pop()
+                if kind != "namespace":
+                    if named is not None and named != name:
+                        problems.append(f"line {i}: `end {named}` closes the {kind} opened at line {opened}")
+                    break
+                if part != name:
+                    problems.append(f"line {i}: `end {named or ''}`".rstrip()
+                                    + f" closes `namespace {name}` from line {opened}")
         elif modifier_at(src, i):
             j = i + 1
             while j <= len(src) and (not src[j - 1].strip() or src[j - 1].lstrip().startswith("--")):
