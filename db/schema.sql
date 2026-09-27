@@ -110,27 +110,13 @@ WHERE NOT d.is_generated -- extract.lean decides this
   AND d.kind IN ('theorem', 'axiom') -- no defs
   AND d.name NOT IN (SELECT name FROM axiom_policy); -- skip known axioms
 
--- edges to draw. a dependency can pass through a declaration that graph_declaration hides, so step over those to the next visible one
--- ex: A -> foo._proof_6 -> B becomes A -> B
--- a function rather than a view: postgres cannot push a proof_id filter into a recursive term,
--- so a view walks every proof in the table and throws away all but one
-CREATE FUNCTION graph_edges(pid bigint)
-RETURNS TABLE (proof_id bigint, from_id bigint, to_id bigint) AS $$
-WITH RECURSIVE visible AS (
-    SELECT d.id, d.kind FROM graph_declaration d WHERE d.proof_id = pid
-), step (from_id, to_id) AS (
-        SELECT e.from_id, e.to_id
-        FROM edge e
-        JOIN visible f ON f.id = e.from_id
-        WHERE e.proof_id = pid AND f.kind <> 'axiom' -- axioms depend on nothing
-    UNION -- not UNION ALL, so a cycle can't loop forever
-        SELECT s.from_id, e.to_id
-        FROM step s
-        JOIN edge e ON e.from_id = s.to_id AND e.proof_id = pid
-        WHERE NOT EXISTS (SELECT 1 FROM visible g WHERE g.id = s.to_id) -- only step over hidden ones
-)
-SELECT DISTINCT pid, from_id, to_id
-FROM step
-WHERE EXISTS (SELECT 1 FROM visible g WHERE g.id = to_id) -- has to land on a visible one
-  AND from_id <> to_id; -- stepping over can lead back to the source
-$$ LANGUAGE sql STABLE; -- stepping over can lead back to the source
+CREATE TABLE visible_edge (
+    proof_id bigint NOT NULL REFERENCES proof(id) ON DELETE CASCADE,
+    from_id bigint NOT NULL REFERENCES declaration(id) ON DELETE CASCADE,
+    to_id bigint NOT NULL REFERENCES declaration(id) ON DELETE CASCADE,
+    PRIMARY KEY (from_id, to_id)
+);
+-- the primary key serves lookups by source; dependents and the roots count ask by target
+CREATE INDEX ON visible_edge (to_id);
+-- a proof's whole graph is read at once to draw it
+CREATE INDEX ON visible_edge (proof_id);

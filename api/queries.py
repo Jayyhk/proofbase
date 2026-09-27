@@ -5,7 +5,6 @@ from sqlalchemy import text
 def store_proof_stats(conn, proof_id):
     conn.execute(
         text("""
-            WITH drawn AS MATERIALIZED (SELECT * FROM graph_edges(:id))
             UPDATE proof SET
                 -- count of this proof's real declarations
                 declarations = (
@@ -20,11 +19,12 @@ def store_proof_stats(conn, proof_id):
                     WHERE d.proof_id = :id
                     AND NOT d.is_instance AND NOT d.is_simp
                     AND NOT EXISTS (
-                        SELECT 1 FROM drawn ge WHERE ge.to_id = d.id
+                        SELECT 1 FROM visible_edge ge
+                        WHERE ge.proof_id = :id AND ge.to_id = d.id
                     )
                 ),
                 -- edges between 2 real declarations (exclude axioms)
-                edges = (SELECT count(*) FROM drawn),
+                edges = (SELECT count(*) FROM visible_edge WHERE proof_id = :id),
                 -- count axiom uses by risk kind
                 flagged = (SELECT count(*) FROM axiom_use WHERE proof_id = :id AND kind <> 'standard'),
                 sorry = (SELECT count(*) FROM axiom_use WHERE proof_id = :id AND kind = 'sorry'),
@@ -183,7 +183,7 @@ def get_declaration_neighbors(conn, declaration_id):
         conn.execute(
             text(f"""
             SELECT t.id, t.name, {severity_sql("t")}
-            FROM graph_edges((SELECT proof_id FROM declaration WHERE id = :id)) e
+            FROM visible_edge e
             JOIN graph_declaration t ON t.id = e.to_id
             WHERE e.from_id = :id
             ORDER BY severity DESC, t.name
@@ -197,7 +197,7 @@ def get_declaration_neighbors(conn, declaration_id):
         conn.execute(
             text(f"""
             SELECT f.id, f.name, {severity_sql("f")}
-            FROM graph_edges((SELECT proof_id FROM declaration WHERE id = :id)) e
+            FROM visible_edge e
             JOIN graph_declaration f ON f.id = e.from_id
             WHERE e.to_id = :id
             ORDER BY severity DESC, f.name
@@ -231,7 +231,7 @@ def get_proof_graph(conn, proof_id):
     edges = (
         conn.execute(
             text("""
-            SELECT from_id, to_id FROM graph_edges(:proof_id)
+            SELECT from_id, to_id FROM visible_edge WHERE proof_id = :proof_id
         """),
             {"proof_id": proof_id}
         )

@@ -20,9 +20,9 @@ forced = set(os.environ.get("PRUNE_FORCED", "").split())
 with engine.connect() as conn:
     version = conn.execute(text("SELECT lean_version FROM proof WHERE id = :p"), {"p": proof_id}).scalar()
     decls = {
-        r.id: (r.name, r.is_generated, r.line_start, r.line_end)
+        r.id: (r.name, r.is_generated, r.line_start, r.line_end, r.is_instance)
         for r in conn.execute(
-            text("SELECT id, name, is_generated, line_start, line_end FROM declaration WHERE proof_id = :p"),
+            text("SELECT id, name, is_generated, line_start, line_end, is_instance FROM declaration WHERE proof_id = :p"),
             {"p": proof_id}
         )
     }
@@ -55,7 +55,7 @@ uses = collections.defaultdict(set)
 for frm, to in edges:
     uses[frm].add(to)
 
-spans = [(st, en or st, i) for i, (nm, gen, st, en) in decls.items() if st]
+spans = [(st, en or st, i) for i, (nm, gen, st, en, _) in decls.items() if st]
 owner_of = {}
 for st, en, i in spans:
     twins = [j for a, b, j in spans if (a, b) == (st, en)]
@@ -73,12 +73,30 @@ for st, en, i in spans:
 for i, holder in inside.items():
     uses[holder].add(i)
 
-written = [(st, en or st) for nm, gen, st, en in decls.values() if st and not gen]
+written = [(st, en or st) for nm, gen, st, en, _ in decls.values() if st and not gen]
 standalone = [
-    i for i, (nm, gen, st, en) in decls.items()
+    i for i, (nm, gen, st, en, _) in decls.items()
     if gen and st and not any(a <= st and (en or st) <= b for a, b in written)
 ]
-reachable, stack = set(), [by_name[root], *standalone]
+SEARCH_ATTR = re.compile(r"@\[[^\]]*\b(?:ext|aesop|grind|fun_prop|norm_cast|push_cast|coe|elab_as_elim"
+                         r"|continuity|measurability|fun_prop|positivity|gcongr|bound|mono|refl|symm|trans"
+                         r"|simps|to_additive|nolint|reducible_and_instances)\b")
+
+
+def tagged_for_search(st):
+    if SEARCH_ATTR.search(lines[st - 1]):
+        return True
+    k = st - 1
+    while k >= 1 and lines[k - 1].lstrip().startswith("@["):
+        if SEARCH_ATTR.search(lines[k - 1]):
+            return True
+        k -= 1
+    return False
+
+
+found_by_search = [i for i, (nm, gen, st, en, inst) in decls.items()
+                   if inst or (st and tagged_for_search(st))]
+reachable, stack = set(), [by_name[root], *standalone, *found_by_search]
 while stack:
     n = stack.pop()
     if n in reachable:
@@ -226,7 +244,7 @@ def declares(start, end, name):
     return bool(written) and not re.match(r"\s*[A-Za-z_]", head[written.end():])
 
 dead, untrusted = {}, 0
-for i, (name, generated, start, end) in decls.items():
+for i, (name, generated, start, end, _) in decls.items():
     if name in forced:
         continue
     if i in reachable or generated or not start or i in inside:
@@ -296,7 +314,7 @@ rescued, drop, clashed, spoken = set(), set(), set(), set()
 while True:
     going = {part for n in dead if n not in rescued for part in n.split("\x00")}
     kept_lines = set()
-    for i, (name, generated, start, end) in decls.items():
+    for i, (name, generated, start, end, _) in decls.items():
         if not start or generated:
             continue
         holder = i
@@ -349,10 +367,25 @@ print(f"declarations {len(decls)}  reachable {len(reachable)}  dead {len(dead)}"
       + (f"  (skipped {untrusted} whose line range does not match their header)" if untrusted else ""))
 
 WORD = re.compile(r"[^\W\d][\w.'!?\u2080-\u2089]*")
-deleted_names = {part.split(".")[-1] for n in dead if n not in rescued for part in n.split("\x00")}
-surviving_names = {nm.split(".")[-1] for nm, _, st, _ in decls.values() if st and st not in drop}
-vanished = deleted_names - surviving_names
+deleted_full = {part for n in dead if n not in rescued for part in n.split("\x00")}
+surviving_full = {nm for nm, _, st, _, _ in decls.values() if st and st not in drop}
+gone = deleted_full - surviving_full
 GROUP = re.compile(r"[\[{(\u2983]([^\]})\u2984]*)[\]})\u2984]")
+
+prefix_at, opened_stack = {}, []
+for i, line in enumerate(BLANK, 1):
+    if NAMESPACE.match(line):
+        for part in NAMESPACE_NAME.match(line).group(1).split("."):
+            opened_stack.append(part)
+    elif SECTION.match(line) or MUTUAL.match(line):
+        opened_stack.append(None)
+    elif END.match(line):
+        for _ in (line.split()[1].split(".") if len(line.split()) > 1 else [None]):
+            if not opened_stack:
+                break
+            if opened_stack.pop() is None:
+                break
+    prefix_at[i] = [p for p in opened_stack if p]
 
 
 def mentions(line):
@@ -360,7 +393,20 @@ def mentions(line):
     for group in GROUP.findall(line):
         head = group.split(":")[0] if ":" in group else ""
         bound.update(WORD.findall(head))
-    return {t.split(".")[-1] for t in WORD.findall(line)} - bound
+    return set(WORD.findall(line)) - bound
+
+
+def names_something_gone(k):
+    chain = prefix_at.get(k, [])
+    for tok in mentions(BLANK[k - 1]):
+        reachable_names = [tok] + [".".join(chain[:n]) + "." + tok for n in range(len(chain), 0, -1)]
+        if any(c in surviving_full for c in reachable_names):
+            continue
+        for whole in reachable_names:
+            parts = whole.split(".")
+            if any(".".join(parts[:n]) in gone for n in range(len(parts), 0, -1)):
+                return True
+    return False
 
 def command_at(k):
     j = k
@@ -377,7 +423,7 @@ for i, line in enumerate(BLANK, 1):
     if i in drop or not BINDER.match(line):
         continue
     span = command_at(i)
-    if any(mentions(BLANK[k - 1]) & vanished for k in span):
+    if any(names_something_gone(k) for k in span):
         orphaned.update(span)
 if orphaned:
     print(f"  dropping {len(orphaned)} lines of examples and commands that name something deleted")

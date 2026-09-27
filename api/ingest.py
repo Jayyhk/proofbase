@@ -74,6 +74,38 @@ def ingest_proof(conn, proof_id, data):
             axiom_deps
         )
 
+    # the drawn graph hides generated declarations, definitions and standard axioms, so a
+    # dependency that passes through one is stepped over to the next declaration that shows.
+    # doing it here walks each declaration once, where sql has to re-cross the hidden region
+    # for every source it carries through the recursion
+    policy = {r[0] for r in conn.execute(text("SELECT name FROM axiom_policy"))}
+    kind_of = {n["name"]: n["kind"] for n in data["nodes"]}
+    shown = {n["name"] for n in data["nodes"]
+             if not n["generated"] and n["kind"] in ("theorem", "axiom") and n["name"] not in policy}
+    after = {}
+    for e in data["edges"]:
+        after.setdefault(e["from"], []).append(e["to"])
+    stepped = []
+    for source in shown:
+        if kind_of[source] == "axiom": # axioms depend on nothing
+            continue
+        seen, stack = set(), list(after.get(source, ()))
+        while stack:
+            name = stack.pop()
+            if name in seen:
+                continue
+            seen.add(name)
+            if name not in shown:
+                stack.extend(after.get(name, ()))
+            elif name != source: # stepping over can lead back to the source
+                stepped.append({"proof_id": proof_id,
+                                "from_id": id_by_name[source], "to_id": id_by_name[name]})
+    if stepped:
+        conn.execute(
+            text("INSERT INTO visible_edge (proof_id, from_id, to_id) VALUES (:proof_id, :from_id, :to_id)"),
+            stepped
+        )
+
     # rows exist now. compute stats, render the svg, mark status as ready
     store_proof_stats(conn, proof_id)
     graph = get_proof_graph(conn, proof_id)

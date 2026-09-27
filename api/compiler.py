@@ -81,7 +81,7 @@ def traced_names(data):
 def simp_edges(messages, nodes):
     owned = {n["name"] for n in nodes}
     by_suffix = {}
-    for name in owned:
+    for name in sorted(owned): # sorted: a set of strings iterates in a different order each run
         parts = name.split(".")
         for i in range(len(parts)):
             by_suffix.setdefault(".".join(parts[i:]), []).append(name)
@@ -102,8 +102,9 @@ def simp_edges(messages, nodes):
             continue
         for lemma in traced_names(message.get("data", "")): # one message can hold several
             candidates = by_suffix.get(lemma, [])
-            if len(candidates) > 1 and user: # ambiguous suffix: the nearest namespace wins
-                candidates = sorted(candidates, key=lambda c: -shared_prefix(c, user))
+            if len(candidates) > 1 and user: # ambiguous suffix: the nearest namespace wins,
+                # and the name breaks a tie so the same trace always yields the same edge
+                candidates = sorted(candidates, key=lambda c: (-shared_prefix(c, user), c))
             full = candidates[0] if candidates else None
             if full and full != user: # only the proof's own, and no self loops
                 edges.add((user, full))
