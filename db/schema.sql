@@ -1,4 +1,4 @@
-DROP TABLE IF EXISTS edge, axiom_dependency, axiom_policy, declaration, proof CASCADE;
+DROP TABLE IF EXISTS visible_edge, edge, axiom_dependency, axiom_policy, declaration, proof CASCADE;
 
 -- one row per proof
 CREATE TABLE proof (

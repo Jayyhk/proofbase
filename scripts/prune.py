@@ -1,7 +1,7 @@
+import bisect
 import collections
 import os
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -79,8 +79,8 @@ standalone = [
     if gen and st and not any(a <= st and (en or st) <= b for a, b in written)
 ]
 SEARCH_ATTR = re.compile(r"@\[[^\]]*\b(?:ext|aesop|grind|fun_prop|norm_cast|push_cast|coe|elab_as_elim"
-                         r"|continuity|measurability|fun_prop|positivity|gcongr|bound|mono|refl|symm|trans"
-                         r"|simps|to_additive|nolint|reducible_and_instances)\b")
+                         r"|continuity|measurability|positivity|gcongr|bound|mono|refl|symm|trans"
+                         r"|simps|to_additive|reducible_and_instances)\b")
 
 
 def tagged_for_search(st):
@@ -94,8 +94,11 @@ def tagged_for_search(st):
     return False
 
 
+# typeclass resolution and the attribute-driven tactics find these by shape rather than by
+# name, so nothing points at them and reachability alone would delete them. the ones lean
+# generates for a type are not seeded: they exist only to serve that type and go with it
 found_by_search = [i for i, (nm, gen, st, en, inst) in decls.items()
-                   if inst or (st and tagged_for_search(st))]
+                   if not gen and (inst or (st and tagged_for_search(st)))]
 reachable, stack = set(), [by_name[root], *standalone, *found_by_search]
 while stack:
     n = stack.pop()
@@ -289,7 +292,7 @@ while b < len(lines):
 merged = 0
 for m, e in blocks:
     members_dead = [n for n, s in dead.items() if m < min(s) and max(s) < e]
-    members = [d for d in decls.values() if d[2] and m < d[2] < e]
+    members = [d for d in decls.values() if d[2] and not d[1] and m < d[2] < e]
     for n in members_dead:
         del dead[n]
     if members and len(members_dead) == len(members):
@@ -367,25 +370,233 @@ print(f"declarations {len(decls)}  reachable {len(reachable)}  dead {len(dead)}"
       + (f"  (skipped {untrusted} whose line range does not match their header)" if untrusted else ""))
 
 WORD = re.compile(r"[^\W\d][\w.'!?\u2080-\u2089]*")
-deleted_full = {part for n in dead if n not in rescued for part in n.split("\x00")}
+# a name stops existing exactly when the lines that wrote it go, which covers the generated
+# ones too: a structure's projections leave with the structure
+deleted_full = ({part for n in dead if n not in rescued for part in n.split("\x00")}
+                | {nm for nm, _, st, _, _ in decls.values() if st and st in drop})
 surviving_full = {nm for nm, _, st, _, _ in decls.values() if st and st not in drop}
 gone = deleted_full - surviving_full
 GROUP = re.compile(r"[\[{(\u2983]([^\]})\u2984]*)[\]})\u2984]")
 
-prefix_at, opened_stack = {}, []
+OPENED = re.compile(r"^\s*(open|export)\b(?!.*\bin\b)\s*(?:scoped\s+)?(.*)$")
+# `open A B in <command>` is in scope for that one command, whether the command follows on the
+# same line or the next
+JUST_FOR_NEXT = re.compile(r"^\s*open\s+(?:scoped\s+)?(.*?)\bin\b")
+CARRIES_ON = re.compile(r"^\s+\S")
+LISTED = re.compile(r"\(([^)]*)\)")
+mine = {nm for nm, _, _, _, _ in decls.values()}
+# PRUNE_NAMES points at a dump of the environment lean compiled against: every constant the
+# library defines, `p` for protected and `i` for an instance. without it the pruner has to
+# assume any name it cannot see is the library's, which is a guess in both directions
+library, library_spaces, guarded = set(), set(), set()
+elsewhere = os.environ.get("PRUNE_NAMES")
+if elsewhere and Path(elsewhere).exists():
+    for entry in Path(elsewhere).read_text().splitlines():
+        name, _, flags = entry.partition(" ")
+        if "n" in flags: # a namespace exists in its own right, with or without constants in it
+            library_spaces.add(name)
+            continue
+        library.add(name)
+        if "p" in flags:
+            guarded.add(name)
+    print(f"  environment: {len(library):,} library names, {len(library_spaces):,} namespaces, "
+          f"{len(guarded):,} protected")
+else:
+    print("  no environment dump: set PRUNE_NAMES to check that every name still resolves")
+PROTECTED = re.compile(r"^\s*(?:@\[[^\]]*\]\s*)*(?:(?:private|noncomputable|unsafe|partial|nonrec)\s+)*protected\b")
+guarded |= {nm for nm, _, st, _, _ in decls.values() if st and PROTECTED.match(BLANK[st - 1])}
+known_names = mine | library
+def spaces_the_file_opens():
+    """namespaces the source declares, which a `namespace` line creates even when it holds
+    nothing: those cannot be found by looking at declaration names"""
+    declared, chain = set(), []
+    for line in BLANK:
+        if NAMESPACE.match(line):
+            chain.extend(NAMESPACE_NAME.match(line).group(1).split("."))
+            declared.add(".".join(part for part in chain if part))
+        elif SECTION.match(line) or MUTUAL.match(line):
+            chain.append(None)
+        elif END.match(line):
+            for _ in (line.split()[1].split(".") if len(line.split()) > 1 else [None]):
+                if not chain:
+                    break
+                if chain.pop() is None:
+                    break
+    return {name for name in declared if name}
+
+
+known_spaces = ({".".join(nm.split(".")[:k])
+                 for nm in known_names for k in range(1, len(nm.split(".")))}
+                | library_spaces | spaces_the_file_opens())
+
+
+def space_here(chain, space, already_open=()):
+    if space.startswith("_root_."): # names the root outright, so the enclosing chain is not tried
+        return space[len("_root_."):]
+    # lean's resolveNamespace: the innermost enclosing namespace that has one by this name wins,
+    # and a name matching none of them is the library's, or nobody's
+    for depth in range(len(chain), 0, -1):
+        full = ".".join(chain[:depth]) + "." + space
+        if full in known_spaces:
+            return full
+    if space in known_spaces:
+        return space
+    for under in already_open:
+        if f"{under}.{space}" in known_spaces:
+            return f"{under}.{space}"
+    return space
+
+def command_span(k):
+    j = k
+    while j < len(BLANK) and not BLANK[j].strip(): # the command may start a line or two below
+        j += 1
+    j += 1
+    while j < len(BLANK) and BLANK[j][:1].isspace() and BLANK[j].strip():
+        j += 1
+    return range(k, min(j, len(BLANK)) + 1)
+
+
+def command_at(k):
+    j = k
+    while j < len(BLANK) and BLANK[j][:1].isspace() and BLANK[j].strip():
+        j += 1
+    return range(k, j + 1)
+
+
+BINDS_NAMES = re.compile(r"^\s*(?:variable|universe)\b")
+DELIMITED = re.compile(r"([\[{(\u2983])([^\]})\u2984]*)[\]})\u2984]")
+
+
+def binders_written(span):
+    """the names a variable or universe command introduces, which shadow anything global"""
+    names = set()
+    for k in span:
+        line = BLANK[k - 1]
+        bare = BINDS_NAMES.match(line)
+        for opener, group in DELIMITED.findall(line):
+            if ":" in group:
+                names.update(WORD.findall(group.split(":")[0]))
+            elif opener != "[": # `[Foo x]` is an anonymous instance: a type, nothing bound
+                names.update(WORD.findall(group))
+        if bare: # `universe u v` and `variable x` write names with no delimiter at all
+            names.update(WORD.findall(DELIMITED.sub(" ", line))[1:])
+    return names
+
+
+prefix_at, scope_at, for_line, binders_at = {}, {}, {}, {}
+namespace_stack, scope_stack, binder_stack = [], [[]], [set()]
 for i, line in enumerate(BLANK, 1):
     if NAMESPACE.match(line):
         for part in NAMESPACE_NAME.match(line).group(1).split("."):
-            opened_stack.append(part)
+            namespace_stack.append(part)
+            scope_stack.append([])
+            binder_stack.append(set())
     elif SECTION.match(line) or MUTUAL.match(line):
-        opened_stack.append(None)
+        namespace_stack.append(None)
+        scope_stack.append([])
+        binder_stack.append(set())
     elif END.match(line):
         for _ in (line.split()[1].split(".") if len(line.split()) > 1 else [None]):
-            if not opened_stack:
+            if not namespace_stack:
                 break
-            if opened_stack.pop() is None:
+            if len(scope_stack) > 1:
+                scope_stack.pop()
+                binder_stack.pop()
+            if namespace_stack.pop() is None:
                 break
-    prefix_at[i] = [p for p in opened_stack if p]
+    else:
+        command = OPENED.match(line)
+        if command:
+            payload, j = command.group(2), i
+            while not payload.strip() and j < len(BLANK) and CARRIES_ON.match(BLANK[j]):
+                payload = BLANK[j]
+                j += 1
+            while j < len(BLANK) and CARRIES_ON.match(BLANK[j]):
+                payload += " " + BLANK[j]
+                j += 1
+            payload = payload.split("--")[0]
+            chain_here = [p for p in namespace_stack if p]
+            open_here = [o[1] for level in scope_stack for o in level if o[0] == "simple"]
+            listed = LISTED.search(payload)
+            names = WORD.findall(payload[:listed.start()] if listed else payload)
+            if listed: # open A (x y), and export A (x y), bring in only those names
+                for space in names:
+                    full = space_here(chain_here, space, open_here)
+                    scope_stack[-1].extend(("alias", member, full + "." + member)
+                                           for member in WORD.findall(listed.group(1)))
+            elif " hiding " in f" {payload} ":
+                head, _, rest = payload.partition("hiding")
+                for space in WORD.findall(head):
+                    scope_stack[-1].append(("simple", space_here(chain_here, space, open_here),
+                                            frozenset(WORD.findall(rest))))
+            else:
+                for space in names:
+                    scope_stack[-1].append(
+                        ("simple", space_here(chain_here, space, open_here), frozenset()))
+    if BINDS_NAMES.match(line):
+        binder_stack[-1] |= binders_written(command_at(i))
+    prefix_at[i] = [p for p in namespace_stack if p]
+    scope_at[i] = [entry for level in scope_stack for entry in level]
+    binders_at[i] = set().union(*binder_stack)
+    just_here = JUST_FOR_NEXT.match(line)
+    if just_here:
+        chain_now = [p for p in namespace_stack if p]
+        already = [o[1] for level in scope_stack for o in level if o[0] == "simple"]
+        brought = [("simple", space_here(chain_now, space, already), frozenset())
+                   for space in WORD.findall(just_here.group(1).split("--")[0])]
+        # the command may be written after the `in` or on the lines below it
+        here = command_at(i) if line[just_here.end():].strip() else command_span(i)
+        for k in here:
+            for_line.setdefault(k, []).extend(brought)
+
+
+def qualified(space, name):
+    # lean's resolveQualifiedName: does `space ++ name` exist, and is it reachable from a bare name
+    full = f"{space}.{name}" if space else name
+    if full not in known_names:
+        return None
+    if "." not in name and full in guarded: # atomic reference to a protected declaration
+        return None
+    return full
+
+
+def referent(k, name, seen=()):
+    """what lean's resolveGlobalName would land on, over this file's declarations and, when a
+    dump of the environment was given, the library's"""
+    if name in seen:
+        return None
+    chain = prefix_at.get(k, [])
+    for depth in range(len(chain), 0, -1): # resolveUsingNamespace: innermost first, first wins
+        found = qualified(".".join(chain[:depth]), name)
+        if found:
+            return found
+    if "." in name: # resolveExact, with _root_ stripped
+        exact = name[len("_root_."):] if name.startswith("_root_.") else name
+        if exact in known_names:
+            return exact
+    if name in known_names:
+        return name
+    reachable_here = list(scope_at.get(k, ())) + for_line.get(k, [])
+    for kind, *rest in reversed(reachable_here): # resolveOpenDecls, latest first
+        if kind == "simple":
+            space, hidden = rest
+            if name not in hidden:
+                found = qualified(space, name)
+                if found:
+                    return found
+        else:
+            opened, resolved = rest
+            if opened == name:
+                if resolved in known_names: # a stale alias does not stop the other opens
+                    return resolved
+                continue
+            if name.startswith(opened + "."):
+                candidate = resolved + name[len(opened):]
+                if candidate in known_names:
+                    return candidate
+    if "." in name: # dot notation: the last component is a projection, resolve the owner
+        return referent(k, name.rsplit(".", 1)[0], (*seen, name))
+    return None
 
 
 def mentions(line):
@@ -396,23 +607,33 @@ def mentions(line):
     return set(WORD.findall(line)) - bound
 
 
-def names_something_gone(k):
-    chain = prefix_at.get(k, [])
-    for tok in mentions(BLANK[k - 1]):
-        reachable_names = [tok] + [".".join(chain[:n]) + "." + tok for n in range(len(chain), 0, -1)]
-        if any(c in surviving_full for c in reachable_names):
-            continue
-        for whole in reachable_names:
-            parts = whole.split(".")
-            if any(".".join(parts[:n]) in gone for n in range(len(parts), 0, -1)):
-                return True
+def names_something_gone(k, bound):
+    for tok in mentions(BLANK[k - 1]) - bound - binders_at.get(k, set()):
+        landed = referent(k, tok)
+        if landed in gone:
+            return True
     return False
 
-def command_at(k):
-    j = k
-    while j < len(BLANK) and BLANK[j][:1].isspace() and BLANK[j].strip():
-        j += 1
-    return range(k, j + 1)
+
+ATTRIBUTES = re.compile(r"@\[([^\]]*)\]|^\s*attribute\s+\[([^\]]*)\]")
+
+
+def bound_across(span):
+    """names a command writes rather than refers to: its binders and the attributes it applies"""
+    names, binder = set(), BINDS_NAMES.match(BLANK[span[0] - 1])
+    for k in span:
+        line = BLANK[k - 1]
+        for wrapped in ATTRIBUTES.findall(line):
+            for entry in "".join(wrapped).split(","):
+                leading = WORD.findall(entry) # `@[to_additive foo]` names foo, `simp` is not one
+                names.update(leading[:1])
+        for opener, group in DELIMITED.findall(line):
+            if ":" in group:
+                names.update(WORD.findall(group.split(":")[0]))
+            elif binder and opener != "[": # `[Foo x]` is an anonymous instance: a type, not a binding
+                names.update(WORD.findall(group))
+    return names
+
 
 EXAMPLE = re.compile(r"^\s*(?:@\[[^\]]*\]\s*)?(?:(?:private|protected|noncomputable)\s+)*example\b")
 
@@ -423,12 +644,15 @@ for i, line in enumerate(BLANK, 1):
     if i in drop or not BINDER.match(line):
         continue
     span = command_at(i)
-    if any(names_something_gone(k) for k in span):
+    bound = bound_across(span)
+    if any(names_something_gone(k, bound) for k in span):
         orphaned.update(span)
 if orphaned:
     print(f"  dropping {len(orphaned)} lines of examples and commands that name something deleted")
     drop |= orphaned
 
+# the guard below asks which original lines are still standing, so their numbers travel too
+origin = [i for i in range(1, len(lines) + 1) if i not in drop]
 lines = [l for i, l in enumerate(lines, 1) if i not in drop]
 print(f"dropped {len(drop):,} lines")
 
@@ -453,7 +677,7 @@ for _ in range(10):
                 opened_names.add(tok)
                 opened_names.update(tok.split("."))
     stack, kill = [], set()
-    empties, occupied_at = [], {}
+    empties = []
     for i, line in enumerate(scan, 1):
         if NAMESPACE.match(line):
             if stack:
@@ -464,41 +688,38 @@ for _ in range(10):
                 parent = f"{parent}.{part}" if parent else part
                 fulls.append(parent)
             for nth, full in enumerate(fulls):
-                stack.append(["namespace", i, False, nth == 0, full, written, fulls[-1]])
+                stack.append(["namespace", i, False, nth == 0, full, written])
         elif SECTION.match(line):
-            stack.append(["section", i, False, False, None, None, None])
+            stack.append(["section", i, False, False, None, None])
         elif MUTUAL.match(line):
-            stack.append(["mutual", i, False, False, None, None, None])
+            stack.append(["mutual", i, False, False, None, None])
         elif END.match(line):
             closing = line.split()[1].split(".") if len(line.split()) > 1 else [None]
             for _ in closing:
                 if not stack:
                     print(f"  warning: unmatched end at line {i}")
                     break
-                kind, opened, occupied, outermost, full, ns, innermost = stack.pop()
+                kind, opened, occupied, outermost, full, ns = stack.pop()
                 if kind != "namespace":
                     if stack and occupied:
                         stack[-1][2] = True
                     break
-                if occupied:
-                    occupied_at.setdefault(full, opened)
-                elif outermost:
-                    empties.append((ns, innermost, opened, i))
+                if not occupied and outermost:
+                    empties.append((ns, opened, i))
                 if stack and occupied:
                     stack[-1][2] = True
         elif stack and lines[i - 1].strip() and not FILLER.match(line):
             stack[-1][2] = True
-    for ns, full, opened, closed in empties:
-        hollow = set(range(opened, closed + 1))
-        if full in occupied_at:
-            kill |= hollow
-        elif not any(part in opened_names for part in [ns, *ns.split(".")]):
-            kill |= hollow
+    for ns, opened, closed in empties:
+        if any(part in opened_names for part in [ns, *ns.split(".")]):
+            continue
+        kill |= set(range(opened, closed + 1))
     if stack:
         print(f"  warning: {len(stack)} scopes left open")
     if not kill:
         break
     emptied += len(kill) // 2
+    origin = [o for i, o in enumerate(origin, 1) if i not in kill]
     lines = [l for i, l in enumerate(lines, 1) if i not in kill]
 
 out, blanks, collapsed = [], 0, 0
@@ -561,6 +782,67 @@ def structural_problems(raw):
         problems.append(f"line {opened}: {kind} {name or ''}".rstrip() + " is never closed")
     return problems
 
+def holds_a_namespace(catalogue, space):
+    """is anything still called `space.something`, without building every prefix of every name"""
+    at = bisect.bisect_left(catalogue, space + ".")
+    return at < len(catalogue) and catalogue[at].startswith(space + ".")
+
+
+def dangling_references(kept):
+    """every name a command still writes down has to still resolve, which is the check lean
+    would make. it needs a dump of the environment: without one a library name cannot be told
+    from a deleted local one. proof bodies are left alone -- the identifiers in them are mostly
+    binders lean introduces locally, which no name table can account for"""
+    if not library:
+        return []
+    left_standing = set(kept)
+    staying = sorted(nm for nm, _, st, _, _ in decls.values() if st and st in left_standing)
+    # an emptied namespace still exists as long as its `namespace` line is kept, which is what
+    # the hollow pass does whenever something opens it
+    shells = set()
+    for i in kept:
+        if NAMESPACE.match(BLANK[i - 1]):
+            chain = prefix_at.get(i, [])
+            for depth in range(1, len(chain) + 1):
+                shells.add(".".join(chain[:depth]))
+    broken, seen = [], set()
+    for i in kept:
+        line = BLANK[i - 1]
+        if not line.strip() or line.lstrip().startswith("--"):
+            continue
+        brought_in = OPENED.match(line) or JUST_FOR_NEXT.match(line)
+        if brought_in:
+            # an open names a namespace, which lives as long as anything inside it does
+            payload = brought_in.group(brought_in.re.groups).split("--")[0]
+            listed = LISTED.search(payload) # `open A (x y)`: only A is a namespace
+            payload = payload[:listed.start()] if listed else payload.partition("hiding")[0]
+            for tok in WORD.findall(payload):
+                space = space_here(prefix_at.get(i, []), tok,
+                                   [o[1] for o in scope_at.get(i, ()) if o[0] == "simple"])
+                if space in library_spaces or space in shells or holds_a_namespace(staying, space):
+                    continue
+                if space not in seen:
+                    seen.add(space)
+                    broken.append(f"line {i}: `{tok}` opens {space}, which will be empty")
+            continue
+        if not BINDER.match(line):
+            continue
+        skip = bound_across(command_at(i)) | binders_at.get(i, set())
+        for tok in mentions(line) - skip:
+            landed = referent(i, tok)
+            if landed in gone and landed not in seen:
+                seen.add(landed)
+                broken.append(f"line {i}: `{tok}` still names {landed}, which is being deleted")
+    return broken
+
+
+dangling = dangling_references(origin)
+if dangling:
+    print(f"refusing to write: {len(dangling)} references would not resolve")
+    for note in dangling[:5]:
+        print(f"  {note}")
+    sys.exit(1)
+
 problems = structural_problems(out)
 if problems:
     print(f"refusing to write: pruning left {len(problems)} structural problems")
@@ -582,6 +864,9 @@ removed = len(original) - len(out)
 print(f"{len(original):,} -> {len(out):,} lines ({100 * removed / len(original):.1f}% removed)")
 
 WANTED = re.compile(r"[Uu]nknown (?:identifier|constant) `([^`]+)`")
+# a namespace exists only while something in it does, and one built from qualified names alone
+# leaves no `namespace` line to keep, so the first declaration under it has to stay
+EMPTIED = re.compile(r"[Uu]nknown namespace `([^`]+)`")
 
 if verify:
     from api.compiler import COMPILE_ENV, run
@@ -597,15 +882,25 @@ if verify:
         print("  verified: the pruned file compiles")
     else:
         asked = {m for line in trouble for m in WANTED.findall(line)}
+        for space in {m for line in trouble for m in EMPTIED.findall(line)}:
+            inhabitant = next((n for n in sorted(by_name)
+                               if f".{space}." in n or n.startswith(space + ".")), None)
+            if inhabitant:
+                asked.add(inhabitant)
         fresh = {n for n in asked if n not in forced} | {
             d for n in asked for d in [next((x for x in by_name if x.endswith("." + n) or x == n), None)] if d
         }
         path.write_text(stored, newline="")
-        if fresh - forced:
-            print(f"  lean wanted {len(fresh - forced)} back, pruning again")
+        rounds = int(os.environ.get("PRUNE_REPAIRS", "0"))
+        if fresh - forced and rounds < 5: # each round is another full compile, so do not spiral
+            print(f"  lean wanted {len(fresh - forced)} back, pruning again (round {rounds + 1})")
             os.execve(sys.executable, [sys.executable, *sys.argv],
-                      {**os.environ, "PRUNE_FORCED": " ".join(forced | fresh)})
-        print(f"  refusing to prune: the result did not compile and lean did not name what is missing")
+                      {**os.environ, "PRUNE_FORCED": " ".join(forced | fresh),
+                       "PRUNE_REPAIRS": str(rounds + 1)})
+        if fresh - forced:
+            print(f"  giving up after {rounds} repairs: lean still wants {len(fresh - forced)} back")
+            sys.exit(1)
+        print("  refusing to prune: the result did not compile and lean did not name what is missing")
         for line in trouble[:3]:
             print(f"    {line[:110]}")
         sys.exit(1)
