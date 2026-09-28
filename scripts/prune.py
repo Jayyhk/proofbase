@@ -99,7 +99,10 @@ def tagged_for_search(st):
 # generates for a type are not seeded: they exist only to serve that type and go with it
 found_by_search = [i for i, (nm, gen, st, en, inst) in decls.items()
                    if not gen and (inst or (st and tagged_for_search(st)))]
-reachable, stack = set(), [by_name[root], *standalone, *found_by_search]
+# a forced name is one lean asked for by hand or after a failed verify: it has to stay, and so
+# does everything it leans on, which only happens if it starts the walk rather than sitting out
+reachable, stack = set(), [by_name[root], *standalone, *found_by_search,
+                           *(by_name[n] for n in forced if n in by_name)]
 while stack:
     n = stack.pop()
     if n in reachable:
@@ -637,9 +640,37 @@ def bound_across(span):
 
 EXAMPLE = re.compile(r"^\s*(?:@\[[^\]]*\]\s*)?(?:(?:private|protected|noncomputable)\s+)*example\b")
 
+def opens_only_a_local_ghost(i, line):
+    """an `open X` where X is this file's own namespace and everything in it is going. with a
+    dump of the environment we can tell that from a library namespace of the same name, which
+    is the only reason this is safe to decide here"""
+    if not library:
+        return False
+    brought_in = OPENED.match(line) or JUST_FOR_NEXT.match(line)
+    if not brought_in:
+        return False
+    payload = brought_in.group(brought_in.re.groups).split("--")[0]
+    listed = LISTED.search(payload)
+    payload = payload[:listed.start()] if listed else payload.partition("hiding")[0]
+    named = WORD.findall(payload)
+    if not named:
+        return False
+    for tok in named:
+        space = space_here(prefix_at.get(i, []), tok,
+                           [o[1] for o in scope_at.get(i, ()) if o[0] == "simple"])
+        if space in library_spaces or space not in known_spaces:
+            return False # the library's, or nobody's: not ours to judge
+        if any(nm == space or nm.startswith(space + ".")
+               for nm, _, st, _, _ in decls.values() if st and st not in drop):
+            return False
+    return True
+
+
 orphaned = set()
 for i, line in enumerate(BLANK, 1):
     if i not in drop and EXAMPLE.match(line):
+        orphaned.update(command_at(i))
+    if i not in drop and opens_only_a_local_ghost(i, line):
         orphaned.update(command_at(i))
     if i in drop or not BINDER.match(line):
         continue
