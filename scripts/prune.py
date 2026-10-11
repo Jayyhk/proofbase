@@ -185,7 +185,10 @@ def registered(ns, k, staying):
 
 
 reachable, forced, observed = set(), set(), False
-stack = [k for k, r in enumerate(rows) if root in r["defines"] or r["role"] == "keep"]
+written = min((k for k, r in enumerate(rows) if r["worldWriter"]), default=len(rows))
+for k in range(written + 1, len(rows)):
+    role[k] = "keep"
+stack = [k for k, r in enumerate(rows) if root in r["defines"] or role[k] == "keep"]
 while True:
     while stack:
         k = stack.pop()
@@ -236,6 +239,7 @@ removed = len(lines) - len(out)
 print(f"{len(kept)} of {len(rows)} commands kept")
 print(f"{len(lines):,} -> {len(out):,} lines ({100 * removed / max(len(lines), 1):.1f}% removed)")
 
+before = set(path.parent.iterdir())
 handle, name = tempfile.mkstemp(suffix=".lean", dir=path.parent)
 os.close(handle)
 candidate = Path(name)
@@ -253,6 +257,9 @@ try:
     os.replace(candidate, path)
 finally:
     candidate.unlink(missing_ok=True)
+    for left in set(path.parent.iterdir()) - before:
+        if left.name.startswith(candidate.name) and left != path:
+            left.unlink(missing_ok=True)
 used = set().union(*(needs[k] for k in kept))
 extra = [min(rows[k]["defines"], key=len) if rows[k]["defines"] else f"line {rows[k]['start']}"
          for k in kept if role[k] == "prunable" and k not in used and root not in rows[k]["defines"]

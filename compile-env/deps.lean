@@ -150,8 +150,9 @@ options -/
 partial def nameNodes (stx : Syntax) (acc : Array Syntax := #[]) : Array Syntax :=
   let k := stx.getKind
   if [``Parser.Tactic.caseArg, ``Parser.Tactic.inductionAltLHS, ``Parser.Term.structInstLVal,
-      ``Parser.Term.attrInstance, ``Parser.Command.set_option, ``Parser.Tactic.set_option,
-      ``Parser.Term.set_option].contains k then acc
+      ``Parser.Term.attrInstance, ``Parser.Command.set_option].contains k then acc
+  -- a `set_option ... in` in a tactic or term names an option, then wraps what it applies to
+  else if k == ``Parser.Tactic.set_option || k == ``Parser.Term.set_option then nameNodes stx[5] acc
   else if k == ``Parser.Term.namedArgument then nameNodes stx[3] acc
   else if stx.isIdent then acc.push stx
   else stx.getArgs.foldl (fun acc a => nameNodes a acc) acc
@@ -226,8 +227,8 @@ def collect (header : Environment) (range : Nat × Nat) (within : Array ((Nat ×
       -- what it would otherwise resolve to is shadowed by a constant or a variable of the file
       if ti.isBinder && ti.stx.isIdent then
         let id := ti.stx.getId
-        let ctor := (ResolveName.resolveGlobalName header ctx.options ctx.currNamespace
-          ctx.openDecls id).any fun (n, fs) => fs.isEmpty && (header.find? n).any (·.isCtor)
+        let ctor := [header, ctx.env].any fun e => (ResolveName.resolveGlobalName e ctx.options
+          ctx.currNamespace ctx.openDecls id).any fun (n, fs) => fs.isEmpty && (e.find? n).any (·.isCtor)
         if ctor then
           modify fun a => { a with shadows := a.shadows.insert id.eraseMacroScopes }
           for (n, _) in ← ctx.runMetaM ti.lctx (resolveGlobalName id) do
@@ -943,7 +944,12 @@ partial def worldly (env : Environment) (seen : NameSet) (e : Expr) : Bool × Na
         -- of, where the value of anything else says nothing about the type it is in
         if d.type.getForallBody.isSort then worldly env (seen.insert c) d.value
         else (found, seen.insert c)
-      | some (.inductInfo i) => worldly env (seen.insert c) i.type
+      | some (.inductInfo i) =>
+        -- a structure holds what its fields hold, as an extension or a linter holds its code
+        i.ctors.foldl (fun (found, seen) k => if found then (found, seen) else
+          match env.find? k with
+          | some ck => worldly env seen ck.type
+          | none => (found, seen)) (worldly env (seen.insert c) i.type)
       | some _ => (found, seen.insert c)
       | none => (false, seen.insert c)) (false, seen)
 
@@ -952,20 +958,6 @@ def effectful (env : Environment) (n : Name) : Bool :=
   match env.find? n with
   | some ci => ci.hasValue && (worldly env {} ci.type).1
   | none => false
-
-/-- the constants a file's code reaches through the file's own constants, where it can write files,
-start processes or set environment variables, which nothing records and anything later may read -/
-partial def writesWorld (env : Environment) (mine : Name → Bool) (seen : NameSet) (n : Name) :
-    Bool × NameSet :=
-  if seen.contains n then (false, seen) else
-  let seen := seen.insert n
-  if [`IO.FS, `IO.Process, `IO.setEnv, `IO.FS.Handle].any (·.isPrefixOf n) then (true, seen) else
-  if !mine n then (false, seen) else
-  match env.find? n with
-  | some ci => ((ci.value? (allowOpaque := true)).map Expr.getUsedConstants |>.getD #[]).foldl
-      (fun (found, seen) c => if found then (found, seen) else writesWorld env mine seen c)
-      (false, seen)
-  | none => (false, seen)
 
 /-- whether a constant is an instance of a class lean's coercions unfold, read off the `coe_decl`
 marking of the class's fields. elaboration unfolds such an instance where it inserts it, so its
@@ -1574,7 +1566,8 @@ unsafe def loop (refs : Array (Name × Reach × NonScalar)) (root : Name) (heade
     if (`trace).isPrefixOf k && v == .ofBool true then tracing := true
   -- the errors of the run the evidence is taken from: a wrapper that checks what lean says fails in
   -- the first run, where the options here add to what it says, so for one the run without it counts
-  let mut evidenced := (s.commandState.messages.toList.filter (·.severity == .error)).length
+  let mut evidenced := ((s.commandState.messages.toList ++ (snapshotMessages s.commandState).toList).filter
+    (·.severity == .error)).length
   if silenced then
     let post ← get
     set { pre with commandState.messages := {}, commandState.snapshotTasks := #[] }
@@ -1716,7 +1709,8 @@ unsafe def loop (refs : Array (Name × Reach × NonScalar)) (root : Name) (heade
       (fileSets `doc.verso && ((String.Pos.Raw.extract fileMap.source startPos stopPos).splitOn "/--").length > 1) then
     needs := needs ++ book.syntaxRows
   -- what the commands it uses that run code of their own read of the environment leaves no record
-  for k in (used.toList.filterMap book.owner).eraseDups do
+  for k in ((used.toList.filter (fun n => !found.named.contains n || written.contains n)).filterMap
+      book.owner).eraseDups do
     if book.coded.contains k then needs := needs ++ (List.range count).toArray
   -- what lean says, where that is checked, prints names as short as the `open`s in effect and the
   -- other constants of the same last name let it, and through the notation switched on
@@ -1784,6 +1778,13 @@ unsafe def loop (refs : Array (Name × Reach × NonScalar)) (root : Name) (heade
     for u in alone do
       if scope.includedVars.contains u then
         needs := needs ++ (book.includes.find? u).toArray
+    -- and lean always takes in what an `include` names, even where a binder of the declaration's
+    -- own has the same name, so matching by name cannot find it
+    if kind == ``Parser.Command.declaration || found.kinds.contains ``Parser.Command.declaration then
+      for u in opens.wrapped.includedVars do
+        unless vs.contains u do
+          taken := u :: taken
+          needs := needs ++ (book.includes.find? u).toArray
   -- any command but a declaration may check identifiers against the section variables by name,
   -- as a notation's quotation is, so it needs the ones it names. a macro that expands to a
   -- declaration, as `lemma` does, is a declaration
@@ -1966,7 +1967,7 @@ unsafe def loop (refs : Array (Name × Reach × NonScalar)) (root : Name) (heade
   -- turning a linter off is what lets a file compile where that linter would fail, so only turning
   -- one on, or changing what lean says in other ways, says nothing more
   let quietOption := bare.getKind == ``Parser.Command.set_option && saysOnly bare[1].getId &&
-    !((`linter).isPrefixOf bare[1].getId && ((bare[3].reprint.getD "").trimAscii.toString == "false"))
+    !((`linter).isPrefixOf bare[1].getId && bare[3].getKind == `false)
   -- a command that changed nothing lean carries on to the next can only have said something
   -- what it put in place that the end of its scope takes away again, and whether it opens a section
   -- that does nothing else
@@ -1988,9 +1989,12 @@ unsafe def loop (refs : Array (Name × Reach × NonScalar)) (root : Name) (heade
   let runs := (kindNodes stx).any (fun (k, _) => runner.contains (k.componentsRev.headD .anonymous)) ||
     written.toList.any (fun k => runner.contains (k.componentsRev.headD .anonymous)) ||
     [``Lean.reduceBool, ``Lean.reduceNat, ``Lean.ofReduceBool, ``Lean.ofReduceNat].any used.contains ||
-    used.toList.any fun n => (book.owner n).isSome && effectful env n
-  -- and code of the file's own that writes files, starts processes or sets environment variables,
-  -- registered where lean runs it without being asked by name, makes every later command stay
+    used.toList.any fun n => (book.owner n).isSome && effectful env n &&
+      (!found.named.contains n || written.contains n)
+  -- and what it runs may read anything outside the environment, written by any command before it
+  if runs then needs := needs ++ (List.range count).toArray
+  -- and code of the file's own that can do IO, registered where lean runs it without being asked by
+  -- name, can write what a later command reads, so it makes every later command stay
   -- what reads a file reads what any command before it may have written, and what writes one does
   -- what nothing records
   let atoms := (atomsOf stx).toList
@@ -2001,9 +2005,15 @@ unsafe def loop (refs : Array (Name × Reach × NonScalar)) (root : Name) (heade
     (atoms.contains "bv_decide" && atoms.any (·.endsWith "graphviz")) ||
     (atomsOf stx).any (· == "graphviz") ||
     (scope.opts.find? `aesop.stats.file).any (· != .ofString "") || turnsOn stx `aesop.stats.file
-  let mine (n : Name) := (book.owner n).isSome || defs.contains n
-  let worldWriter := !changes.isEmpty && defs.toList.any fun d =>
-    effectful env d && (writesWorld env mine {} d).1
+  -- code registered for syntax the file declares runs only where that syntax is written, which needs
+  -- this command anyway; registered for imported syntax, or in a table lean runs by itself, it can
+  -- run anywhere after
+  let keys := newKeys macroAttribute.ext before env ++ newKeys Term.termElabAttribute.ext before env ++
+    newKeys Tactic.tacticElabAttribute.ext before env ++ newKeys Command.commandElabAttribute.ext before env
+  let ownKeys := keys.all fun k => (book.owner k).isSome || defs.contains k
+  let elsewhere := changes.any fun n => unrecorded.contains n.toString ||
+    n.toString == "Mathlib.Meta.NormNum.normNumExt"
+  let worldWriter := !changes.isEmpty && defs.toList.any (effectful env ·) && (!ownKeys || elsewhere)
   -- the command's lines run from where it starts to where its last token ends, which can be the
   -- line the next command starts on
   let first := (fileMap.toPosition startPos).line
