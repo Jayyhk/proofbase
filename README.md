@@ -18,7 +18,7 @@ Sample proofs are in `data/lean`, their extracted graphs in `data/json`. To comp
 
 ```
 curl -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y
-for v in compile-env/*/; do (cd "$v" && lake update && lake exe cache get); done
+for v in compile-env/*/; do (cd "$v" && lake update && lake exe cache get && lake build deps); done
 ```
 
 ## Deploy

@@ -8,3 +8,9 @@ rev = "v4.33.0"
 
 [[lean_lib]]
 name = "Upload"
+
+[[lean_exe]]
+name = "deps"
+srcDir = ".."
+root = "deps"
+supportInterpreter = true

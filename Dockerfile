@@ -33,7 +33,7 @@ RUN for v in compile-env/*/; do \
 RUN for v in compile-env/*/; do \
       ( cd "$v" && \
         for i in 1 2 3 4 5; do \
-          lake update && lake exe cache get && break; \
+          lake update && lake exe cache get && lake build deps && break; \
           echo "mathlib fetch attempt $i for $v failed, retrying"; \
           [ "$i" = 5 ] && exit 1; \
         done ) || exit 1; \

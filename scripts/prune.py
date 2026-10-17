@@ -7,8 +7,6 @@ from pathlib import Path
 
 from api.compiler import COMPILE_ENV, run
 
-DUMPER = COMPILE_ENV / "deps.lean"
-
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 if not args:
     sys.exit("usage: python -m scripts.prune FILE [ROOT]")
@@ -40,8 +38,7 @@ def lean(file, mode):
     os.close(handle)
     out = Path(name)
     try:
-        done = run(["lake", "env", "lean", "--run", str(DUMPER), str(file), str(out), mode, root],
-                   env_dir)
+        done = run(["lake", "exe", "deps", str(file), str(out), mode, root], env_dir)
         text = out.read_text(encoding="utf-8")
     finally:
         out.unlink(missing_ok=True)
